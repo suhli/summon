@@ -1,0 +1,19 @@
+import { Palette } from "std-widgets.slint";
+
+export global Theme {
+    in-out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+
+    out property <color> panel: dark ? #202020.with-alpha(0.82) : #F3F3F3.with-alpha(0.86);
+    out property <color> panel-solid: dark ? #202020 : #F3F3F3;
+    out property <color> search-bg: dark ? #2C2C2C.with-alpha(0.92) : #FFFFFF.with-alpha(0.92);
+    out property <color> search-border: dark ? #FFFFFF.with-alpha(0.08) : #000000.with-alpha(0.08);
+    out property <color> text: Palette.foreground;
+    out property <color> muted: dark ? #FFFFFF.with-alpha(0.55) : #000000.with-alpha(0.55);
+    out property <color> tile-hover: dark ? #FFFFFF.with-alpha(0.08) : #000000.with-alpha(0.05);
+    out property <color> tile-selected: dark ? #FFFFFF.with-alpha(0.12) : #000000.with-alpha(0.08);
+    out property <color> tile-pressed: dark ? #FFFFFF.with-alpha(0.16) : #000000.with-alpha(0.12);
+    out property <color> accent: Palette.accent-background;
+    out property <color> toast-bg: dark ? #2B2B2B : #FFFFFF;
+    out property <length> radius: 12px;
+    out property <length> tile-radius: 10px;
+}

@@ -1,0 +1,115 @@
+import { Button, LineEdit, HorizontalBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export component NavItem inherits Rectangle {
+    in property <string> title;
+    in property <bool> active;
+    callback clicked();
+
+    height: 36px;
+    border-radius: 6px;
+    background: active ? Theme.tile-selected : (touch.has-hover ? Theme.tile-hover : transparent);
+
+    touch := TouchArea { clicked => { root.clicked(); } }
+
+    Text {
+        x: 12px;
+        width: parent.width - 12px;
+        height: 100%;
+        text: title;
+        color: Theme.text;
+        vertical-alignment: center;
+        font-weight: active ? 600 : 400;
+    }
+}
+
+export component LabeledEdit inherits VerticalLayout {
+    in property <string> label;
+    in-out property <string> value;
+    in property <bool> enabled: true;
+    in property <string> placeholder: "";
+    spacing: 4px;
+    Text { text: label; color: Theme.muted; }
+    LineEdit {
+        text <=> root.value;
+        enabled: root.enabled;
+        placeholder-text: root.placeholder;
+    }
+}
+
+export component PathRow inherits VerticalLayout {
+    in property <string> label;
+    in-out property <string> value;
+    in property <bool> enabled: true;
+    callback browse-clicked();
+    spacing: 4px;
+    Text { text: label; color: Theme.muted; }
+    HorizontalLayout {
+        spacing: 8px;
+        LineEdit {
+            text <=> root.value;
+            enabled: root.enabled;
+            horizontal-stretch: 1;
+        }
+        Button {
+            text: "Browse";
+            enabled: root.enabled;
+            clicked => { root.browse-clicked(); }
+        }
+    }
+}
+
+export component HotkeyRow inherits HorizontalLayout {
+    in property <string> value;
+    in property <bool> available: true;
+    in property <bool> recording: false;
+    in property <string> preview: "";
+    in property <bool> enabled: true;
+    callback record-clicked();
+    callback clear-clicked();
+    callback cancel-clicked();
+    spacing: 8px;
+
+    Rectangle {
+        border-radius: 6px;
+        background: Theme.search-bg;
+        border-width: 1px;
+        border-color: recording ? Theme.accent : Theme.search-border;
+        height: 32px;
+        horizontal-stretch: 1;
+
+        HorizontalLayout {
+            padding-left: 10px;
+            padding-right: 10px;
+            spacing: 8px;
+            Text {
+                text: recording ? preview : (value == "" ? "None" : value);
+                color: value == "" && !recording ? Theme.muted : Theme.text;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            if !recording && value != "" : Text {
+                text: available ? "Available" : "Unavailable";
+                color: available ? #0F7B0F : #E81123;
+                vertical-alignment: center;
+                font-size: 12px;
+            }
+        }
+    }
+
+    if recording : Button {
+        text: "Cancel";
+        enabled: root.enabled;
+        clicked => { root.cancel-clicked(); }
+    }
+    if !recording : Button {
+        text: "Record";
+        enabled: root.enabled;
+        clicked => { root.record-clicked(); }
+    }
+    if !recording : Button {
+        text: "Clear";
+        enabled: root.enabled && value != "";
+        clicked => { root.clear-clicked(); }
+    }
+}

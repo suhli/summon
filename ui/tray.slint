@@ -1,0 +1,46 @@
+export component AppTray inherits SystemTrayIcon {
+    icon: @image-url("assets/tray.svg");
+    tooltip: "Summon";
+    title: "Summon";
+
+    in-out property <bool> launch-at-startup: false;
+
+    callback open-launcher();
+    callback open-settings();
+    callback reload-config();
+    callback startup-toggled(bool);
+    callback exit-app();
+
+    clicked => {
+        root.open-launcher();
+    }
+
+    Menu {
+        MenuItem {
+            title: "Open";
+            activated => { root.open-launcher(); }
+        }
+        MenuItem {
+            title: "Settings";
+            activated => { root.open-settings(); }
+        }
+        MenuItem {
+            title: "Reload Config";
+            activated => { root.reload-config(); }
+        }
+        MenuSeparator {}
+        MenuItem {
+            title: "Launch at Startup";
+            checkable: true;
+            checked: root.launch-at-startup;
+            activated => {
+                root.startup-toggled(self.checked);
+            }
+        }
+        MenuSeparator {}
+        MenuItem {
+            title: "Exit";
+            activated => { root.exit-app(); }
+        }
+    }
+}

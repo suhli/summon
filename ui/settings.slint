@@ -1,0 +1,366 @@
+import { Button, CheckBox, ComboBox, LineEdit, Palette, ScrollView, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { NavItem, LabeledEdit, PathRow, HotkeyRow } from "settings-widgets.slint";
+
+export struct SettingsEntryRow {
+    id: string,
+    name: string,
+    hotkey: string,
+    hotkey-ok: bool,
+    action-label: string,
+}
+
+export component SettingsWindow inherits Window {
+    title: "Summon Settings";
+    preferred-width: 900px;
+    preferred-height: 640px;
+    min-width: 760px;
+    min-height: 520px;
+    background: Palette.background;
+    default-font-family: "Segoe UI Variable";
+    default-font-size: 14px;
+    icon: @image-url("assets/tray.svg");
+
+    in-out property <int> page: 0;
+    in-out property <string> launcher-hotkey: "Alt+Space";
+    in-out property <bool> launcher-hotkey-ok: true;
+    in-out property <bool> hide-on-focus-lost: true;
+    in-out property <bool> launch-at-startup: false;
+    in-out property <bool> recording: false;
+    in-out property <string> record-target: "";
+    in-out property <string> record-preview: "Press a shortcut";
+    in-out property <[SettingsEntryRow]> entries: [];
+    in-out property <int> selected-entry: -1;
+
+    in-out property <string> edit-id: "";
+    in-out property <string> edit-name: "";
+    in-out property <string> edit-keywords: "";
+    in-out property <string> edit-icon: "";
+    in-out property <string> edit-hotkey: "";
+    in-out property <bool> edit-hotkey-ok: true;
+    in-out property <int> edit-action-index: 0;
+    in-out property <string> edit-path: "";
+    in-out property <string> edit-args: "";
+    in-out property <string> edit-working-dir: "";
+    in-out property <string> edit-url: "";
+    in-out property <string> edit-command: "";
+    in-out property <string> edit-script: "";
+    in-out property <string> inline-error: "";
+    in-out property <string> toast-text: "";
+    in-out property <bool> toast-visible: false;
+
+    out property <[string]> action-types: ["Application", "File", "Directory", "URL", "Command", "PowerShell"];
+
+    callback page-changed(int);
+    callback hide-focus-toggled(bool);
+    callback startup-toggled(bool);
+    callback start-record(string);
+    callback cancel-record();
+    callback clear-hotkey(string);
+    callback record-key(string, bool, bool, bool, bool);
+    callback select-entry(int);
+    callback add-entry();
+    callback delete-entry();
+    callback save-entry();
+    callback browse-icon();
+    callback browse-path();
+    callback browse-working-dir();
+
+    property <bool> show-path: edit-action-index == 0 || edit-action-index == 1 || edit-action-index == 2;
+    property <bool> show-args: edit-action-index == 0 || edit-action-index == 4;
+    property <bool> show-workdir: edit-action-index == 0 || edit-action-index == 4;
+    property <bool> show-url: edit-action-index == 3;
+    property <bool> show-command: edit-action-index == 4;
+    property <bool> show-script: edit-action-index == 5;
+
+    HorizontalLayout {
+        nav := Rectangle {
+            width: 180px;
+            background: Theme.dark ? #2B2B2B : #EDEDED;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 6px;
+
+                Text {
+                    text: "Summon";
+                    font-size: 18px;
+                    font-weight: 600;
+                    color: Theme.text;
+                }
+
+                NavItem {
+                    title: "General";
+                    active: root.page == 0;
+                    clicked => {
+                        root.page = 0;
+                        root.page-changed(0);
+                    }
+                }
+                NavItem {
+                    title: "Entries";
+                    active: root.page == 1;
+                    clicked => {
+                        root.page = 1;
+                        root.page-changed(1);
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            horizontal-stretch: 1;
+
+            if root.page == 0 : ScrollView {
+                VerticalBox {
+                    padding: 28px;
+                    spacing: 18px;
+                    alignment: start;
+
+                    Text {
+                        text: "General";
+                        font-size: 24px;
+                        font-weight: 600;
+                    }
+
+                    Text { text: "Launcher shortcut"; color: Theme.muted; }
+
+                    HotkeyRow {
+                        value: root.launcher-hotkey;
+                        available: root.launcher-hotkey-ok;
+                        recording: root.recording && root.record-target == "launcher";
+                        preview: root.record-preview;
+                        record-clicked => { root.start-record("launcher"); }
+                        clear-clicked => { root.clear-hotkey("launcher"); }
+                        cancel-clicked => { root.cancel-record(); }
+                    }
+
+                    CheckBox {
+                        text: "Hide when focus is lost";
+                        checked <=> root.hide-on-focus-lost;
+                        toggled => { root.hide-focus-toggled(self.checked); }
+                    }
+
+                    CheckBox {
+                        text: "Launch at startup";
+                        checked <=> root.launch-at-startup;
+                        toggled => { root.startup-toggled(self.checked); }
+                    }
+                }
+            }
+
+            if root.page == 1 : HorizontalLayout {
+                padding: 20px;
+                spacing: 16px;
+
+                Rectangle {
+                    width: 240px;
+                    border-radius: 8px;
+                    background: Theme.search-bg;
+                    border-width: 1px;
+                    border-color: Theme.search-border;
+
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 8px;
+
+                        Button {
+                            text: "Add Entry";
+                            clicked => { root.add-entry(); }
+                        }
+
+                        Flickable {
+                            vertical-stretch: 1;
+                            viewport-width: parent.width;
+
+                            VerticalLayout {
+                                spacing: 2px;
+                                for item[i] in root.entries : Rectangle {
+                                    height: 48px;
+                                    border-radius: 6px;
+                                    background: i == root.selected-entry ? Theme.tile-selected
+                                        : (item-touch.has-hover ? Theme.tile-hover : transparent);
+
+                                    item-touch := TouchArea {
+                                        clicked => { root.select-entry(i); }
+                                    }
+
+                                    VerticalLayout {
+                                        padding-left: 10px;
+                                        padding-right: 10px;
+                                        alignment: center;
+                                        Text {
+                                            text: item.name;
+                                            overflow: elide;
+                                            color: Theme.text;
+                                        }
+                                        Text {
+                                            text: item.hotkey == "" ? item.action-label : item.hotkey;
+                                            color: item.hotkey != "" && !item.hotkey-ok ? #E81123 : Theme.muted;
+                                            font-size: 11px;
+                                            overflow: elide;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                ScrollView {
+                    horizontal-stretch: 1;
+
+                    VerticalBox {
+                        padding: 8px;
+                        spacing: 12px;
+                        alignment: start;
+
+                        Text {
+                            text: root.edit-id == "" ? "Select an entry" : "Edit Entry";
+                            font-size: 20px;
+                            font-weight: 600;
+                        }
+
+                        LabeledEdit {
+                            label: "Name";
+                            value <=> root.edit-name;
+                            enabled: root.edit-id != "";
+                        }
+                        LabeledEdit {
+                            label: "Keywords";
+                            value <=> root.edit-keywords;
+                            enabled: root.edit-id != "";
+                            placeholder: "game, 游戏";
+                        }
+
+                        PathRow {
+                            label: "Icon";
+                            value <=> root.edit-icon;
+                            enabled: root.edit-id != "";
+                            browse-clicked => { root.browse-icon(); }
+                        }
+
+                        Text { text: "Hotkey"; color: Theme.muted; }
+
+                        HotkeyRow {
+                            value: root.edit-hotkey;
+                            available: root.edit-hotkey-ok;
+                            recording: root.recording && root.record-target == "entry";
+                            preview: root.record-preview;
+                            enabled: root.edit-id != "";
+                            record-clicked => { root.start-record("entry"); }
+                            clear-clicked => { root.clear-hotkey("entry"); }
+                            cancel-clicked => { root.cancel-record(); }
+                        }
+
+                        Text { text: "Action"; color: Theme.muted; }
+                        ComboBox {
+                            model: root.action-types;
+                            current-index <=> root.edit-action-index;
+                            enabled: root.edit-id != "";
+                        }
+
+                        if root.show-path : PathRow {
+                            label: root.edit-action-index == 2 ? "Directory Path" : (root.edit-action-index == 0 ? "Executable" : "File Path");
+                            value <=> root.edit-path;
+                            enabled: root.edit-id != "";
+                            browse-clicked => { root.browse-path(); }
+                        }
+                        if root.show-args : LabeledEdit {
+                            label: "Arguments";
+                            value <=> root.edit-args;
+                            enabled: root.edit-id != "";
+                        }
+                        if root.show-workdir : PathRow {
+                            label: "Working Directory";
+                            value <=> root.edit-working-dir;
+                            enabled: root.edit-id != "";
+                            browse-clicked => { root.browse-working-dir(); }
+                        }
+                        if root.show-url : LabeledEdit {
+                            label: "URL";
+                            value <=> root.edit-url;
+                            enabled: root.edit-id != "";
+                        }
+                        if root.show-command : LabeledEdit {
+                            label: "Command";
+                            value <=> root.edit-command;
+                            enabled: root.edit-id != "";
+                        }
+                        if root.show-script : LabeledEdit {
+                            label: "Script / Command";
+                            value <=> root.edit-script;
+                            enabled: root.edit-id != "";
+                        }
+
+                        if root.inline-error != "" : Text {
+                            text: root.inline-error;
+                            color: #E81123;
+                            wrap: word-wrap;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            Button {
+                                text: "Save";
+                                primary: true;
+                                enabled: root.edit-id != "";
+                                clicked => { root.save-entry(); }
+                            }
+                            Button {
+                                text: "Delete";
+                                enabled: root.edit-id != "";
+                                clicked => { root.delete-entry(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    recorder := FocusScope {
+        x: 0;
+        y: 0;
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if !root.recording {
+                return reject;
+            }
+            if event.text == Key.Escape {
+                root.cancel-record();
+                return accept;
+            }
+            root.record-key(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta);
+            accept
+        }
+    }
+
+    changed recording => {
+        if recording {
+            recorder.focus();
+        }
+    }
+
+    if root.toast-visible : Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: parent.height - self.height - 24px;
+        width: min(parent.width - 48px, settings-toast.preferred-width + 32px);
+        height: 36px;
+        border-radius: 8px;
+        background: Theme.toast-bg;
+        drop-shadow-blur: 12px;
+        drop-shadow-color: #000000.with-alpha(0.2);
+
+        settings-toast := Text {
+            text: root.toast-text;
+            color: Theme.text;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+

@@ -1,0 +1,217 @@
+import { Palette } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { EntryTile } from "entry-tile.slint";
+
+export struct TileData {
+    id: string,
+    name: string,
+    icon: image,
+}
+
+export component LauncherWindow inherits Window {
+    title: "";
+    no-frame: true;
+    always-on-top: true;
+    preferred-width: 760px;
+    preferred-height: 540px;
+    min-width: 650px;
+    min-height: 450px;
+    max-width: 850px;
+    max-height: 650px;
+    background: transparent;
+    default-font-family: "Segoe UI Variable";
+    default-font-size: 14px;
+    icon: @image-url("assets/tray.svg");
+
+    in-out property <[TileData]> tiles: [];
+    in-out property <string> query: "";
+    in-out property <int> selected-index: 0;
+    in-out property <int> columns: 6;
+    in-out property <bool> request-focus: false;
+    in-out property <string> toast-text: "";
+    in-out property <bool> toast-visible: false;
+    in-out property <bool> empty: false;
+
+    callback query-changed(string);
+    callback execute-selected();
+    callback execute-id(string);
+    callback hide-requested();
+    callback move-left();
+    callback move-right();
+    callback move-up();
+    callback move-down();
+    callback width-changed(length);
+
+    changed width => {
+        root.width-changed(root.width);
+    }
+
+    changed request-focus => {
+        if request-focus {
+            search-input.focus();
+            request-focus = false;
+        }
+    }
+
+    changed selected-index => {
+        ensure-visible(selected-index);
+    }
+
+    function ensure-visible(index: int) {
+        if columns <= 0 || index < 0 { return; }
+        let row = columns <= 0 ? 0 : index / columns;
+        let y = row * 112px;
+        if y < scroller.viewport-y {
+            scroller.viewport-y = y;
+        }
+        if y + 112px > scroller.viewport-y + scroller.height {
+            scroller.viewport-y = max(0px, y + 112px - scroller.height);
+        }
+    }
+
+    Rectangle {
+        border-radius: Theme.radius;
+        background: Theme.panel;
+        border-width: 1px;
+        border-color: Theme.search-border;
+        drop-shadow-blur: 28px;
+        drop-shadow-color: #000000.with-alpha(0.28);
+        drop-shadow-offset-y: 8px;
+        clip: true;
+
+        keys := FocusScope {
+            x: 0; y: 0;
+            width: parent.width;
+            height: parent.height;
+
+            capture-key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.hide-requested();
+                    return accept;
+                }
+                if event.text == Key.Return {
+                    root.execute-selected();
+                    return accept;
+                }
+                if event.text == Key.UpArrow {
+                    root.move-up();
+                    return accept;
+                }
+                if event.text == Key.DownArrow {
+                    root.move-down();
+                    return accept;
+                }
+                if event.text == Key.LeftArrow {
+                    root.move-left();
+                    return accept;
+                }
+                if event.text == Key.RightArrow {
+                    root.move-right();
+                    return accept;
+                }
+                reject
+            }
+
+            VerticalLayout {
+                padding: 20px;
+                spacing: 16px;
+
+                search-box := Rectangle {
+                    height: 44px;
+                    border-radius: 8px;
+                    background: Theme.search-bg;
+                    border-width: 1px;
+                    border-color: search-input.has-focus ? Theme.accent : Theme.search-border;
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        spacing: 10px;
+
+                        Image {
+                            source: @image-url("assets/search.svg");
+                            width: 16px;
+                            height: 16px;
+                        }
+
+                        search-input := TextInput {
+                            text <=> root.query;
+                            font-size: 16px;
+                            color: Theme.text;
+                            vertical-alignment: center;
+                            single-line: true;
+                            edited => {
+                                root.query-changed(self.text);
+                            }
+                        }
+                    }
+
+                    if search-input.text == "" : Text {
+                        x: 40px;
+                        y: 0;
+                        width: parent.width - 50px;
+                        height: parent.height;
+                        text: "Search";
+                        color: Theme.muted;
+                        font-size: 16px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+
+                    scroller := Flickable {
+                        width: 100%;
+                        height: 100%;
+                        viewport-width: parent.width;
+
+                        grid := GridLayout {
+                            spacing: 8px;
+                            width: parent.width;
+
+                            for tile[i] in root.tiles : EntryTile {
+                                row: root.columns <= 0 ? 0 : i / root.columns;
+                                col: root.columns <= 0 ? 0 : mod(i, root.columns);
+                                name: tile.name;
+                                icon: tile.icon;
+                                selected: i == root.selected-index;
+                                clicked => {
+                                    root.execute-id(tile.id);
+                                }
+                            }
+                        }
+                    }
+
+                    if root.empty : Text {
+                        width: 100%;
+                        height: 100%;
+                        text: "No results";
+                        color: Theme.muted;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+
+    if root.toast-visible : Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: parent.height - self.height - 24px;
+        width: min(parent.width - 48px, toast-label.preferred-width + 32px);
+        height: 36px;
+        border-radius: 8px;
+        background: Theme.toast-bg;
+        drop-shadow-blur: 12px;
+        drop-shadow-color: #000000.with-alpha(0.2);
+
+        toast-label := Text {
+            text: root.toast-text;
+            color: Theme.text;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            font-size: 13px;
+        }
+    }
+}
