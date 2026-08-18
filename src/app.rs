@@ -43,6 +43,7 @@ struct State {
     style_applied: bool,
     focus_hooked: bool,
     shown_at: Option<Instant>,
+    held_focus: bool,
     focus_watch: Timer,
     recording_target: Option<String>,
     toast_timer: Timer,
@@ -109,6 +110,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         style_applied: false,
         focus_hooked: false,
         shown_at: None,
+        held_focus: false,
         focus_watch: Timer::default(),
         recording_target: None,
         toast_timer: Timer::default(),
@@ -283,7 +285,7 @@ fn wire(app: &Rc<App>) {
     });
 
     {
-        app.ui.tray.on_open_launcher(|| defer(show_launcher));
+        app.ui.tray.on_open_launcher(|| with_app(show_launcher));
     }
     {
         app.ui.tray.on_open_settings(|| defer(show_settings));
@@ -456,13 +458,22 @@ fn toggle_launcher(app: &Rc<App>) {
 }
 
 fn show_launcher(app: &Rc<App>) {
-    if app.state.borrow().launcher_visible {
-        defer(focus_launcher);
+    let already_visible = {
+        let mut inner = app.state.borrow_mut();
+        inner.shown_at = Some(Instant::now());
+        inner.held_focus = false;
+        if inner.launcher_visible {
+            true
+        } else {
+            inner.launcher_visible = true;
+            false
+        }
+    };
+    if already_visible {
+        steal_focus(app, true);
         return;
     }
-    app.state.borrow_mut().launcher_visible = true;
-    app.state.borrow_mut().shown_at = Some(Instant::now());
-    defer(show_launcher_now);
+    show_launcher_now(app);
 }
 
 fn show_launcher_now(app: &Rc<App>) {
@@ -473,40 +484,21 @@ fn show_launcher_now(app: &Rc<App>) {
         app.state.borrow_mut().launcher_visible = false;
         return;
     }
-    ensure_launcher_style(app);
-    if let Some(hwnd) = hwnd_from_slint(app.ui.launcher.window()) {
-        app.state.borrow_mut().launcher_hwnd = hwnd;
-        window::force_foreground(hwnd);
-    }
+    steal_focus(app, true);
     start_focus_watch(app);
-    defer(focus_launcher);
+    defer(|app| steal_focus(app, false));
 }
 
-fn focus_launcher(app: &Rc<App>) {
+fn steal_focus(app: &Rc<App>, aggressive: bool) {
+    if !app.state.borrow().launcher_visible {
+        return;
+    }
     ensure_launcher_style(app);
     if let Some(hwnd) = hwnd_from_slint(app.ui.launcher.window()) {
         app.state.borrow_mut().launcher_hwnd = hwnd;
-        window::force_foreground(hwnd);
+        window::force_foreground(hwnd, aggressive);
     }
     app.ui.launcher.set_request_focus(true);
-    slint::Timer::single_shot(Duration::from_millis(40), || {
-        with_app(|app| {
-            if app.state.borrow().launcher_visible {
-                app.ui.launcher.set_request_focus(true);
-            }
-        });
-    });
-    slint::Timer::single_shot(Duration::from_millis(120), || {
-        with_app(|app| {
-            if !app.state.borrow().launcher_visible {
-                return;
-            }
-            if let Some(hwnd) = hwnd_from_slint(app.ui.launcher.window()) {
-                window::force_foreground(hwnd);
-            }
-            app.ui.launcher.set_request_focus(true);
-        });
-    });
 }
 
 fn hide_launcher(app: &Rc<App>) {
@@ -518,6 +510,9 @@ fn hide_launcher(app: &Rc<App>) {
 }
 
 fn hide_launcher_now(app: &Rc<App>) {
+    if app.state.borrow().launcher_visible {
+        return;
+    }
     stop_focus_watch(app);
     let _ = app.ui.launcher.hide();
     reset_launcher_view(app);
@@ -566,22 +561,28 @@ fn ensure_launcher_style(app: &Rc<App>) {
 }
 
 fn maybe_hide_on_focus_lost(app: &Rc<App>) {
-    let inner = app.state.borrow();
+    let mut inner = app.state.borrow_mut();
     if !inner.config.launcher.hide_on_focus_lost || !inner.launcher_visible {
-        return;
-    }
-    if inner
-        .shown_at
-        .is_some_and(|shown_at| shown_at.elapsed() < Duration::from_millis(400))
-    {
         return;
     }
     let foreground = window::current_foreground();
     let ours = [inner.launcher_hwnd, inner.settings_hwnd];
     if window::is_our_hwnd(foreground, &ours) {
+        inner.held_focus = true;
         return;
     }
+    let held_focus = inner.held_focus;
+    let within_grace = inner
+        .shown_at
+        .is_some_and(|shown_at| shown_at.elapsed() < Duration::from_millis(300));
     drop(inner);
+    if !held_focus {
+        steal_focus(app, false);
+        return;
+    }
+    if within_grace {
+        return;
+    }
     hide_launcher(app);
 }
 
@@ -599,7 +600,7 @@ fn show_settings_now(app: &Rc<App>) {
     }
     if let Some(hwnd) = hwnd_from_slint(app.ui.settings.window()) {
         app.state.borrow_mut().settings_hwnd = hwnd;
-        window::force_foreground(hwnd);
+        window::force_foreground(hwnd, true);
     }
     app.state.borrow_mut().settings_visible = true;
 }

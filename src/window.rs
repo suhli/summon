@@ -15,11 +15,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_MENU,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, CallWindowProcW, GetAncestor, GetForegroundWindow, GetWindowLongPtrW,
-    GetWindowThreadProcessId, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    EVENT_SYSTEM_FOREGROUND, GA_ROOT, GWLP_WNDPROC, GWL_EXSTYLE, HWND_TOPMOST, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_SHOW, WA_INACTIVE, WINEVENT_OUTOFCONTEXT, WM_ACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    AllowSetForegroundWindow, BringWindowToTop, CallWindowProcW, GetAncestor, GetForegroundWindow,
+    GetWindowLongPtrW, GetWindowThreadProcessId, SetForegroundWindow, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, EVENT_SYSTEM_FOREGROUND, GA_ROOT, GWLP_WNDPROC, GWL_EXSTYLE,
+    HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    SW_SHOW, WA_INACTIVE, WINEVENT_OUTOFCONTEXT, WM_ACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
 };
 
 const DWMWCP_ROUND: DWM_WINDOW_CORNER_PREFERENCE = DWM_WINDOW_CORNER_PREFERENCE(2);
@@ -198,26 +198,41 @@ fn notify_focus_lost() {
     }
 }
 
-pub fn force_foreground(hwnd: HWND) {
+pub fn force_foreground(hwnd: HWND, aggressive: bool) {
     unsafe {
+        let _ = AllowSetForegroundWindow(u32::MAX);
         let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+        );
+
         let foreground = GetForegroundWindow();
         let mut foreground_pid = 0;
         let foreground_tid = GetWindowThreadProcessId(foreground, Some(&mut foreground_pid));
         let current_tid = GetCurrentThreadId();
-
-        if foreground_tid != 0 && foreground_tid != current_tid {
+        let attached = foreground_tid != 0 && foreground_tid != current_tid;
+        if attached {
             let _ = AttachThreadInput(foreground_tid, current_tid, true);
         }
 
-        pulse_alt_key();
         if !SetForegroundWindow(hwnd).as_bool() {
-            warn!("SetForegroundWindow failed");
+            if aggressive {
+                pulse_alt_key();
+            }
+            if !SetForegroundWindow(hwnd).as_bool() {
+                warn!("SetForegroundWindow failed");
+            }
         }
         let _ = BringWindowToTop(hwnd);
         let _ = SetFocus(Some(hwnd));
 
-        if foreground_tid != 0 && foreground_tid != current_tid {
+        if attached {
             let _ = AttachThreadInput(foreground_tid, current_tid, false);
         }
     }
