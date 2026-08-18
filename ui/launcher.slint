@@ -52,6 +52,7 @@ export component LauncherWindow inherits Window {
     callback execute-id(string);
     callback hide-requested();
     callback focus-lost();
+    callback remove-id(string);
     callback move-left();
     callback move-right();
     callback move-up();
@@ -253,6 +254,9 @@ export component LauncherWindow inherits Window {
                                 selected: i == root.selected-index;
                                 clicked => {
                                     root.execute-id(tile.id);
+                                }
+                                remove-requested => {
+                                    root.remove-id(tile.id);
                                 }
                             }
                         }

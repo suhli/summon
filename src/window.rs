@@ -14,7 +14,7 @@ use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Accessibility::SetWinEventHook;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYEVENTF_KEYUP, VK_LBUTTON, VK_MENU,
+    KEYEVENTF_KEYUP, VK_LBUTTON, VK_MENU, VK_RBUTTON,
 };
 use windows::Win32::UI::Shell::{
     DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, SetWindowSubclass, HDROP,
@@ -262,7 +262,15 @@ unsafe fn collect_drop_paths(hdrop: HDROP) -> Vec<PathBuf> {
 }
 
 pub fn primary_button_down() -> bool {
-    unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000 != 0 }
+    mouse_button_down(VK_LBUTTON.0 as i32)
+}
+
+pub fn pointing_button_down() -> bool {
+    mouse_button_down(VK_LBUTTON.0 as i32) || mouse_button_down(VK_RBUTTON.0 as i32)
+}
+
+fn mouse_button_down(vk: i32) -> bool {
+    unsafe { GetAsyncKeyState(vk) as u16 & 0x8000 != 0 }
 }
 
 pub fn force_foreground(hwnd: HWND, aggressive: bool) {

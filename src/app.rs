@@ -201,6 +201,12 @@ fn wire(app: &Rc<App>) {
         });
     }
     {
+        let app_cb = app.clone();
+        app.ui.launcher.on_remove_id(move |id| {
+            remove_launcher_entry(&app_cb, &id);
+        });
+    }
+    {
         app.ui.launcher.on_hide_requested(|| defer(hide_launcher));
     }
     {
@@ -620,7 +626,7 @@ fn attach_winit_file_drop(app: &Rc<App>) {
 }
 
 fn maybe_hide_on_focus_lost(app: &Rc<App>) {
-    if window::primary_button_down() {
+    if window::pointing_button_down() {
         return;
     }
     let mut inner = app.state.borrow_mut();
@@ -979,17 +985,48 @@ fn add_entry(app: &Rc<App>) {
 
 fn delete_entry(app: &Rc<App>) {
     let id = app.ui.settings.get_edit_id().to_string();
-    if id.is_empty() {
-        return;
+    if let Some(name) = remove_entry_by_id(app, &id) {
+        settings_toast(app, &format!("Removed {name}"));
     }
+}
+
+fn remove_launcher_entry(app: &Rc<App>, id: &str) {
     {
         let mut inner = app.state.borrow_mut();
-        inner.config.entries.retain(|entry| entry.id != id);
+        inner.shown_at = Some(Instant::now());
+        inner.held_focus = true;
     }
+    if let Some(name) = remove_entry_by_id(app, id) {
+        toast(app, &format!("Removed {name}"));
+    }
+}
+
+fn remove_entry_by_id(app: &Rc<App>, id: &str) -> Option<String> {
+    if id.is_empty() {
+        return None;
+    }
+    let name = {
+        let mut inner = app.state.borrow_mut();
+        let index = inner.config.entries.iter().position(|entry| entry.id == id)?;
+        let name = inner.config.entries[index].name.clone();
+        inner.config.entries.remove(index);
+        info!(id, name = %name, "removed entry");
+        name
+    };
     persist(app);
-    apply_all(app, true);
-    clear_editor(&app.ui.settings);
-    app.ui.settings.set_selected_entry(-1);
+    {
+        let mut inner = app.state.borrow_mut();
+        let entries = inner.config.entries.clone();
+        inner.icons.refresh_changed(&entries);
+    }
+    reregister_hotkeys(app);
+    refresh_launcher(app);
+    refresh_settings_list(app);
+    if app.ui.settings.get_edit_id().as_str() == id {
+        clear_editor(&app.ui.settings);
+        app.ui.settings.set_selected_entry(-1);
+    }
+    Some(name)
 }
 
 fn save_entry(app: &Rc<App>) {

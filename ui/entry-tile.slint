@@ -5,57 +5,99 @@ export component EntryTile inherits Rectangle {
     in property <image> icon;
     in property <bool> selected;
     callback clicked();
+    callback remove-requested();
 
     background: transparent;
     clip: true;
 
-    highlight := Rectangle {
-        x: 4px;
-        y: 4px;
-        width: parent.width - 8px;
-        height: parent.height - 8px;
-        border-radius: Theme.tile-radius;
-        background: touch.pressed ? Theme.tile-pressed
-            : (selected ? Theme.tile-selected
-            : (touch.has-hover ? Theme.tile-hover : transparent));
+    menu := ContextMenuArea {
+        width: 100%;
+        height: 100%;
 
-        VerticalLayout {
-            width: 100%;
-            height: 100%;
-            padding-left: 6px;
-            padding-right: 6px;
-            spacing: 6px;
-
-            Rectangle {
-                vertical-stretch: 1;
-            }
-
-            HorizontalLayout {
-                alignment: center;
-                Image {
-                    source: icon;
-                    width: 40px;
-                    height: 40px;
-                    image-fit: contain;
-                }
-            }
-
-            Text {
-                text: name;
-                color: Theme.text;
-                font-size: 12px;
-                horizontal-alignment: center;
-                overflow: elide;
-            }
-
-            Rectangle {
-                vertical-stretch: 1;
+        Menu {
+            MenuItem {
+                title: "Remove";
+                activated => { root.remove-requested(); }
             }
         }
-    }
 
-    touch := TouchArea {
-        clicked => { root.clicked(); }
-        mouse-cursor: pointer;
+        highlight := Rectangle {
+            x: 4px;
+            y: 4px;
+            width: parent.width - 8px;
+            height: parent.height - 8px;
+            border-radius: Theme.tile-radius;
+            background: touch.pressed ? Theme.tile-pressed
+                : (selected ? Theme.tile-selected
+                : (touch.has-hover ? Theme.tile-hover : transparent));
+
+            VerticalLayout {
+                width: 100%;
+                height: 100%;
+                padding-left: 6px;
+                padding-right: 6px;
+                spacing: 6px;
+
+                Rectangle {
+                    vertical-stretch: 1;
+                }
+
+                HorizontalLayout {
+                    alignment: center;
+                    Image {
+                        source: icon;
+                        width: 40px;
+                        height: 40px;
+                        image-fit: contain;
+                    }
+                }
+
+                Text {
+                    text: name;
+                    color: Theme.text;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                }
+            }
+        }
+
+        touch := TouchArea {
+            clicked => { root.clicked(); }
+            mouse-cursor: pointer;
+            pointer-event(event) => {
+                if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
+                    menu.show({ x: self.mouse-x, y: self.mouse-y });
+                }
+            }
+        }
+
+        if touch.has-hover : Rectangle {
+            x: parent.width - 26px;
+            y: 8px;
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+            background: remove-touch.has-hover ? Theme.tile-pressed : Theme.tile-hover;
+
+            Text {
+                width: 100%;
+                height: 100%;
+                text: "×";
+                color: Theme.muted;
+                font-size: 14px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            remove-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.remove-requested(); }
+            }
+        }
     }
 }
