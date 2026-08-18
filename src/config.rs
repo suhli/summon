@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
 
-use crate::model::{Action, Entry};
+use crate::model::Entry;
 
-pub const CONFIG_VERSION: u32 = 1;
+pub const CONFIG_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -107,6 +107,9 @@ pub fn load() -> Config {
         Ok(text) => match toml::from_str::<Config>(&text) {
             Ok(mut config) => {
                 sanitize(&mut config);
+                if migrate(&mut config) {
+                    let _ = save(&config);
+                }
                 info!(entries = config.entries.len(), "config loaded");
                 config
             }
@@ -172,128 +175,35 @@ fn sanitize(config: &mut Config) {
     }
 }
 
-fn default_entries() -> Vec<Entry> {
-    let userprofile = std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("C:\\Users\\Public"));
-    let windir = std::env::var_os("WINDIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("C:\\Windows"));
-    let system32 = windir.join("System32");
+fn migrate(config: &mut Config) -> bool {
+    if config.version >= CONFIG_VERSION {
+        return false;
+    }
 
-    vec![
-        Entry {
-            id: "notepad".into(),
-            name: "Notepad".into(),
-            description: Some("Windows Notepad".into()),
-            icon: None,
-            keywords: vec!["text".into(), "editor".into()],
-            hotkey: None,
-            action: Action::App {
-                path: system32.join("notepad.exe"),
-                args: Vec::new(),
-                working_dir: None,
-            },
-        },
-        Entry {
-            id: "explorer".into(),
-            name: "Explorer".into(),
-            description: Some("File Explorer".into()),
-            icon: None,
-            keywords: vec!["files".into(), "folder".into()],
-            hotkey: None,
-            action: Action::App {
-                path: windir.join("explorer.exe"),
-                args: Vec::new(),
-                working_dir: None,
-            },
-        },
-        Entry {
-            id: "downloads".into(),
-            name: "Downloads".into(),
-            description: Some("Downloads folder".into()),
-            icon: None,
-            keywords: vec!["folder".into(), "files".into()],
-            hotkey: None,
-            action: Action::Directory {
-                path: userprofile.join("Downloads"),
-            },
-        },
-        Entry {
-            id: "calculator".into(),
-            name: "Calculator".into(),
-            description: Some("Windows Calculator".into()),
-            icon: None,
-            keywords: vec!["calc".into(), "math".into()],
-            hotkey: None,
-            action: Action::App {
-                path: PathBuf::from("calc.exe"),
-                args: Vec::new(),
-                working_dir: None,
-            },
-        },
-        Entry {
-            id: "settings".into(),
-            name: "Settings".into(),
-            description: Some("Windows Settings".into()),
-            icon: None,
-            keywords: vec!["system".into()],
-            hotkey: None,
-            action: Action::Url {
-                url: "ms-settings:".into(),
-            },
-        },
-        Entry {
-            id: "powershell".into(),
-            name: "PowerShell".into(),
-            description: Some("Windows PowerShell".into()),
-            icon: None,
-            keywords: vec!["terminal".into(), "shell".into()],
-            hotkey: None,
-            action: Action::App {
-                path: system32.join("WindowsPowerShell").join("v1.0").join("powershell.exe"),
-                args: Vec::new(),
-                working_dir: None,
-            },
-        },
-        Entry {
-            id: "terminal".into(),
-            name: "Command Prompt".into(),
-            description: Some("Windows Command Prompt".into()),
-            icon: None,
-            keywords: vec!["cmd".into(), "terminal".into()],
-            hotkey: None,
-            action: Action::App {
-                path: system32.join("cmd.exe"),
-                args: Vec::new(),
-                working_dir: None,
-            },
-        },
-        Entry {
-            id: "chatgpt".into(),
-            name: "ChatGPT".into(),
-            description: Some("Open ChatGPT in the browser".into()),
-            icon: None,
-            keywords: vec!["ai".into(), "gpt".into()],
-            hotkey: None,
-            action: Action::Url {
-                url: "https://chatgpt.com".into(),
-            },
-        },
-        Entry {
-            id: "paint".into(),
-            name: "Paint".into(),
-            description: Some("Microsoft Paint".into()),
-            icon: None,
-            keywords: vec!["image".into(), "draw".into()],
-            hotkey: None,
-            action: Action::App {
-                path: system32.join("mspaint.exe"),
-                args: Vec::new(),
-                working_dir: None,
-            },
-        },
-    ]
+    if config.version < 2 {
+        const STOCK_IDS: &[&str] = &[
+            "notepad",
+            "explorer",
+            "downloads",
+            "calculator",
+            "settings",
+            "powershell",
+            "terminal",
+            "chatgpt",
+            "paint",
+        ];
+        config
+            .entries
+            .retain(|entry| !STOCK_IDS.contains(&entry.id.as_str()));
+        info!("removed built-in starter entries");
+    }
+
+    config.version = CONFIG_VERSION;
+    true
+}
+
+fn default_entries() -> Vec<Entry> {
+    Vec::new()
 }
 
 pub fn expand_path(path: &Path) -> PathBuf {

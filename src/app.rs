@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -16,7 +17,7 @@ use crate::icon::IconCache;
 use crate::model::{new_entry_id, Action, Entry};
 use crate::nav::{self, Direction};
 use crate::window::hwnd_from_slint;
-use crate::{action, config, dialog, monitor, search, startup, window};
+use crate::{action, config, dialog, dropped, monitor, search, startup, tray_drop, window};
 
 slint::include_modules!();
 
@@ -135,6 +136,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
     if let Err(error) = app.ui.tray.show() {
         error!(%error, "tray show failed");
     }
+    slint::Timer::single_shot(Duration::from_millis(200), || {
+        tray_drop::install();
+    });
 
     slint::Timer::single_shot(Duration::from_millis(1), || {
         with_app(show_launcher);
@@ -556,11 +560,28 @@ fn ensure_launcher_style(app: &Rc<App>) {
                 slint::Timer::single_shot(Duration::ZERO, || with_app(maybe_hide_on_focus_lost));
             }
         });
+        window::attach_drop_handler(hwnd, |paths| {
+            let fallback = paths.clone();
+            let queued = slint::invoke_from_event_loop(move || {
+                slint::Timer::single_shot(Duration::ZERO, move || {
+                    with_app(move |app| handle_dropped_paths(app, paths));
+                });
+            });
+            if queued.is_err() {
+                slint::Timer::single_shot(Duration::ZERO, move || {
+                    with_app(move |app| handle_dropped_paths(app, fallback));
+                });
+            }
+        });
         inner.focus_hooked = true;
     }
+    window::enable_file_drop(hwnd);
 }
 
 fn maybe_hide_on_focus_lost(app: &Rc<App>) {
+    if window::primary_button_down() {
+        return;
+    }
     let mut inner = app.state.borrow_mut();
     if !inner.config.launcher.hide_on_focus_lost || !inner.launcher_visible {
         return;
@@ -584,6 +605,54 @@ fn maybe_hide_on_focus_lost(app: &Rc<App>) {
         return;
     }
     hide_launcher(app);
+}
+
+fn handle_dropped_paths(app: &Rc<App>, paths: Vec<PathBuf>) {
+    if paths.is_empty() {
+        return;
+    }
+
+    let mut added = 0usize;
+    let mut skipped = 0usize;
+    {
+        let mut inner = app.state.borrow_mut();
+        for path in paths {
+            let entry = dropped::entry_from_path(path);
+            if inner
+                .config
+                .entries
+                .iter()
+                .any(|existing| dropped::same_target(&existing.action, &entry.action))
+            {
+                skipped += 1;
+                continue;
+            }
+            info!(name = %entry.name, "added dropped entry");
+            inner.config.entries.push(entry);
+            added += 1;
+        }
+        inner.shown_at = Some(Instant::now());
+        inner.held_focus = false;
+    }
+
+    if added > 0 {
+        persist(app);
+        apply_all(app, false);
+    }
+
+    let message = match (added, skipped) {
+        (0, 0) => return,
+        (0, _) => "Already in Summon".to_string(),
+        (1, _) => "Added 1 shortcut".to_string(),
+        (count, _) => format!("Added {count} shortcuts"),
+    };
+    let visible = app.state.borrow().launcher_visible;
+    if added > 0 && !visible {
+        show_launcher(app);
+    } else {
+        steal_focus(app, true);
+    }
+    toast(app, &message);
 }
 
 fn show_settings(app: &Rc<App>) {

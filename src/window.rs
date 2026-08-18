@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::OnceLock;
 
@@ -12,14 +13,17 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Accessibility::SetWinEventHook;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_MENU,
+    GetAsyncKeyState, SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+    KEYEVENTF_KEYUP, VK_LBUTTON, VK_MENU,
 };
+use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, BringWindowToTop, CallWindowProcW, GetAncestor, GetForegroundWindow,
     GetWindowLongPtrW, GetWindowThreadProcessId, SetForegroundWindow, SetWindowLongPtrW,
     SetWindowPos, ShowWindow, EVENT_SYSTEM_FOREGROUND, GA_ROOT, GWLP_WNDPROC, GWL_EXSTYLE,
     HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-    SW_SHOW, WA_INACTIVE, WINEVENT_OUTOFCONTEXT, WM_ACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    SW_SHOW, WA_INACTIVE, WINEVENT_OUTOFCONTEXT, WM_ACTIVATE, WM_DROPFILES, WS_EX_ACCEPTFILES,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
 };
 
 const DWMWCP_ROUND: DWM_WINDOW_CORNER_PREFERENCE = DWM_WINDOW_CORNER_PREFERENCE(2);
@@ -45,7 +49,10 @@ pub fn hwnd_from_slint(window: &slint::Window) -> Option<HWND> {
 pub fn apply_launcher_style(hwnd: HWND, dark_mode: bool) {
     unsafe {
         let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let updated = current | WS_EX_TOOLWINDOW.0 as isize | WS_EX_TOPMOST.0 as isize;
+        let updated = current
+            | WS_EX_TOOLWINDOW.0 as isize
+            | WS_EX_TOPMOST.0 as isize
+            | WS_EX_ACCEPTFILES.0 as isize;
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, updated);
         let _ = SetWindowPos(
             hwnd,
@@ -56,6 +63,7 @@ pub fn apply_launcher_style(hwnd: HWND, dark_mode: bool) {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         );
+        enable_file_drop(hwnd);
 
         let corner = DWMWCP_ROUND;
         if let Err(error) = DwmSetWindowAttribute(
@@ -105,6 +113,7 @@ pub fn apply_launcher_style(hwnd: HWND, dark_mode: bool) {
 }
 
 static FOCUS_LOST: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+static DROP_FILES: OnceLock<Box<dyn Fn(Vec<PathBuf>) + Send + Sync>> = OnceLock::new();
 static WINEVENT_HOOKED: AtomicBool = AtomicBool::new(false);
 static SUBCLASSED_HWND: AtomicIsize = AtomicIsize::new(0);
 static OLD_WNDPROC: AtomicIsize = AtomicIsize::new(0);
@@ -113,6 +122,21 @@ pub fn attach_focus_lost_handler(hwnd: HWND, callback: impl Fn() + Send + Sync +
     let _ = FOCUS_LOST.set(Box::new(callback));
     subclass_launcher(hwnd);
     install_foreground_hook();
+}
+
+pub fn attach_drop_handler(hwnd: HWND, callback: impl Fn(Vec<PathBuf>) + Send + Sync + 'static) {
+    let _ = DROP_FILES.set(Box::new(callback));
+    subclass_launcher(hwnd);
+    enable_file_drop(hwnd);
+}
+
+pub fn enable_file_drop(hwnd: HWND) {
+    if hwnd.0.is_null() {
+        return;
+    }
+    unsafe {
+        DragAcceptFiles(hwnd, true);
+    }
 }
 
 fn install_foreground_hook() {
@@ -165,6 +189,10 @@ unsafe extern "system" fn launcher_wndproc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if msg == WM_DROPFILES {
+        notify_drop_files(HDROP(wparam.0 as *mut std::ffi::c_void));
+        return LRESULT(0);
+    }
     if msg == WM_ACTIVATE {
         let state = (wparam.0 as u32) & 0xffff;
         if state == WA_INACTIVE {
@@ -196,6 +224,48 @@ fn notify_focus_lost() {
     if let Some(callback) = FOCUS_LOST.get() {
         callback();
     }
+}
+
+fn notify_drop_files(hdrop: HDROP) {
+    let paths = unsafe { collect_drop_paths(hdrop) };
+    dispatch_dropped_paths(paths);
+}
+
+pub fn dispatch_dropped_paths(paths: Vec<PathBuf>) {
+    if paths.is_empty() {
+        return;
+    }
+    if let Some(callback) = DROP_FILES.get() {
+        callback(paths);
+    }
+}
+
+pub fn paths_from_wparam(wparam: WPARAM) -> Vec<PathBuf> {
+    unsafe { collect_drop_paths(HDROP(wparam.0 as *mut std::ffi::c_void)) }
+}
+
+unsafe fn collect_drop_paths(hdrop: HDROP) -> Vec<PathBuf> {
+    let count = DragQueryFileW(hdrop, 0xFFFF_FFFF, None);
+    let mut paths = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        let needed = DragQueryFileW(hdrop, index, None) as usize;
+        if needed == 0 {
+            continue;
+        }
+        let mut buffer = vec![0u16; needed + 1];
+        let written = DragQueryFileW(hdrop, index, Some(&mut buffer));
+        if written == 0 {
+            continue;
+        }
+        let end = buffer.iter().position(|c| *c == 0).unwrap_or(written as usize);
+        paths.push(PathBuf::from(String::from_utf16_lossy(&buffer[..end])));
+    }
+    DragFinish(hdrop);
+    paths
+}
+
+pub fn primary_button_down() -> bool {
+    unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000 != 0 }
 }
 
 pub fn force_foreground(hwnd: HWND, aggressive: bool) {

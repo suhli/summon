@@ -4,6 +4,7 @@ mod action;
 mod app;
 mod config;
 mod dialog;
+mod dropped;
 mod hotkey;
 mod icon;
 mod model;
@@ -11,6 +12,7 @@ mod monitor;
 mod nav;
 mod search;
 mod startup;
+mod tray_drop;
 mod window;
 
 use std::fs::OpenOptions;
