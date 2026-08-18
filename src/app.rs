@@ -129,9 +129,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
     sync_general_controls(&app);
 
     if let Err(error) = app.ui.tray.show() {
-        error!(%error, "tray show failed, keeping launcher visible as fallback");
-        show_launcher(&app);
+        error!(%error, "tray show failed");
     }
+    show_launcher(&app);
 
     info!("Summon ready");
     slint::run_event_loop_until_quit()?;
@@ -1020,7 +1020,8 @@ fn settings_toast(app: &Rc<App>, message: &str) {
 }
 
 fn columns_for_width(width: f32) -> i32 {
-    let cols = ((width - 48.0) / 116.0).floor() as i32;
+    let inner = (width - 40.0).max(1.0);
+    let cols = (inner / 120.0).floor() as i32;
     cols.clamp(5, 7)
 }
 

@@ -6,12 +6,18 @@ export component EntryTile inherits Rectangle {
     in property <bool> selected;
     callback clicked();
 
-    width: 108px;
-    height: 104px;
-    border-radius: Theme.tile-radius;
-    background: touch.pressed ? Theme.tile-pressed
-        : (selected ? Theme.tile-selected
-        : (touch.has-hover ? Theme.tile-hover : transparent));
+    background: transparent;
+
+    highlight := Rectangle {
+        x: 6px;
+        y: 4px;
+        width: parent.width - 12px;
+        height: parent.height - 8px;
+        border-radius: Theme.tile-radius;
+        background: touch.pressed ? Theme.tile-pressed
+            : (selected ? Theme.tile-selected
+            : (touch.has-hover ? Theme.tile-hover : transparent));
+    }
 
     touch := TouchArea {
         clicked => { root.clicked(); }
@@ -19,17 +25,20 @@ export component EntryTile inherits Rectangle {
     }
 
     VerticalLayout {
-        padding-top: 12px;
+        padding-top: 14px;
         padding-bottom: 8px;
+        padding-left: 8px;
+        padding-right: 8px;
         spacing: 8px;
-        alignment: center;
 
-        Image {
-            source: icon;
-            width: 40px;
-            height: 40px;
-            image-fit: contain;
-            horizontal-alignment: center;
+        HorizontalLayout {
+            alignment: center;
+            Image {
+                source: icon;
+                width: 40px;
+                height: 40px;
+                image-fit: contain;
+            }
         }
 
         Text {
@@ -40,7 +49,6 @@ export component EntryTile inherits Rectangle {
             wrap: word-wrap;
             overflow: elide;
             height: 32px;
-            width: 96px;
         }
     }
 }

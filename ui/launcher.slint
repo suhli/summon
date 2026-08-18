@@ -31,6 +31,8 @@ export component LauncherWindow inherits Window {
     in-out property <string> toast-text: "";
     in-out property <bool> toast-visible: false;
     in-out property <bool> empty: false;
+    out property <length> cell-w: columns > 0 ? (root.width - 40px) / columns : 120px;
+    out property <length> cell-h: 110px;
 
     callback query-changed(string);
     callback execute-selected();
@@ -70,12 +72,12 @@ export component LauncherWindow inherits Window {
     function ensure-visible(index: int) {
         if columns <= 0 || index < 0 { return; }
         let row = columns <= 0 ? 0 : index / columns;
-        let y = row * 112px;
+        let y = row * root.cell-h;
         if y < scroller.viewport-y {
             scroller.viewport-y = y;
         }
-        if y + 112px > scroller.viewport-y + scroller.height {
-            scroller.viewport-y = max(0px, y + 112px - scroller.height);
+        if y + root.cell-h > scroller.viewport-y + scroller.height {
+            scroller.viewport-y = max(0px, y + root.cell-h - scroller.height);
         }
     }
 
@@ -134,6 +136,7 @@ export component LauncherWindow inherits Window {
                     border-color: search-input.has-focus ? Theme.accent : Theme.search-border;
 
                     HorizontalLayout {
+                        height: 100%;
                         padding-left: 14px;
                         padding-right: 14px;
                         spacing: 10px;
@@ -142,6 +145,7 @@ export component LauncherWindow inherits Window {
                             source: @image-url("assets/search.svg");
                             width: 16px;
                             height: 16px;
+                            vertical-alignment: center;
                         }
 
                         search-input := TextInput {
@@ -174,21 +178,20 @@ export component LauncherWindow inherits Window {
                     scroller := Flickable {
                         width: 100%;
                         height: 100%;
-                        viewport-width: parent.width;
+                        viewport-width: self.width;
+                        viewport-height: root.columns <= 0 || root.tiles.length == 0 ? self.height
+                            : max(self.height, ((root.tiles.length + root.columns - 1) / root.columns) * root.cell-h);
 
-                        grid := GridLayout {
-                            spacing: 8px;
-                            width: parent.width;
-
-                            for tile[i] in root.tiles : EntryTile {
-                                row: root.columns <= 0 ? 0 : i / root.columns;
-                                col: root.columns <= 0 ? 0 : mod(i, root.columns);
-                                name: tile.name;
-                                icon: tile.icon;
-                                selected: i == root.selected-index;
-                                clicked => {
-                                    root.execute-id(tile.id);
-                                }
+                        for tile[i] in root.tiles : EntryTile {
+                            x: root.columns <= 0 ? 0 : mod(i, root.columns) * root.cell-w;
+                            y: root.columns <= 0 ? 0 : (i / root.columns) * root.cell-h;
+                            width: root.cell-w;
+                            height: root.cell-h;
+                            name: tile.name;
+                            icon: tile.icon;
+                            selected: i == root.selected-index;
+                            clicked => {
+                                root.execute-id(tile.id);
                             }
                         }
                     }
