@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use slint::{
     CloseRequestResponse, ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel,
@@ -42,6 +42,7 @@ struct State {
     settings_hwnd: HWND,
     style_applied: bool,
     focus_hooked: bool,
+    shown_at: Option<Instant>,
     recording_target: Option<String>,
     toast_timer: Timer,
     settings_toast_timer: Timer,
@@ -63,6 +64,10 @@ fn with_app(func: impl FnOnce(&Rc<App>)) {
             func(&app);
         }
     });
+}
+
+fn defer(func: impl FnOnce(&Rc<App>) + 'static) {
+    slint::Timer::single_shot(Duration::ZERO, move || with_app(func));
 }
 
 pub fn run() -> Result<(), slint::PlatformError> {
@@ -102,6 +107,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         settings_hwnd: HWND::default(),
         style_applied: false,
         focus_hooked: false,
+        shown_at: None,
         recording_target: None,
         toast_timer: Timer::default(),
         settings_toast_timer: Timer::default(),
@@ -169,8 +175,7 @@ fn wire(app: &Rc<App>) {
         });
     }
     {
-        let app_cb = app.clone();
-        app.ui.launcher.on_hide_requested(move || hide_launcher(&app_cb));
+        app.ui.launcher.on_hide_requested(|| defer(hide_launcher));
     }
     {
         let app_cb = app.clone();
@@ -201,9 +206,8 @@ fn wire(app: &Rc<App>) {
         });
     }
 
-    let launcher_for_close = app.clone();
-    app.ui.launcher.window().on_close_requested(move || {
-        hide_launcher(&launcher_for_close);
+    app.ui.launcher.window().on_close_requested(|| {
+        defer(hide_launcher);
         CloseRequestResponse::KeepWindowShown
     });
 
@@ -265,19 +269,16 @@ fn wire(app: &Rc<App>) {
         app.ui.settings.on_browse_working_dir(move || browse_path(&app_cb, BrowseKind::WorkingDir));
     }
 
-    let settings_for_close = app.clone();
-    app.ui.settings.window().on_close_requested(move || {
-        hide_settings(&settings_for_close);
+    app.ui.settings.window().on_close_requested(|| {
+        defer(hide_settings);
         CloseRequestResponse::KeepWindowShown
     });
 
     {
-        let app_cb = app.clone();
-        app.ui.tray.on_open_launcher(move || show_launcher(&app_cb));
+        app.ui.tray.on_open_launcher(|| defer(show_launcher));
     }
     {
-        let app_cb = app.clone();
-        app.ui.tray.on_open_settings(move || show_settings(&app_cb));
+        app.ui.tray.on_open_settings(|| defer(show_settings));
     }
     {
         let app_cb = app.clone();
@@ -288,14 +289,15 @@ fn wire(app: &Rc<App>) {
         app.ui.tray.on_startup_toggled(move |checked| set_startup(&app_cb, checked));
     }
     {
-        let app_cb = app.clone();
-        app.ui.tray.on_exit_app(move || {
-            info!("exit requested");
-            app_cb.hotkeys.shutdown();
-            let _ = app_cb.ui.launcher.hide();
-            let _ = app_cb.ui.settings.hide();
-            let _ = app_cb.ui.tray.hide();
-            slint::quit_event_loop().ok();
+        app.ui.tray.on_exit_app(|| {
+            defer(|app| {
+                info!("exit requested");
+                app.hotkeys.shutdown();
+                let _ = app.ui.launcher.hide();
+                let _ = app.ui.settings.hide();
+                let _ = app.ui.tray.hide();
+                slint::quit_event_loop().ok();
+            });
         });
     }
 }
@@ -431,7 +433,6 @@ fn refresh_launcher(app: &Rc<App>) {
     app.ui.launcher.set_selected_index(selected);
     app.ui.launcher.set_empty(empty);
     app.ui.launcher.set_columns(columns);
-    app.ui.launcher.set_query(app.state.borrow().query.clone().into());
 }
 
 fn refresh_settings_list(app: &Rc<App>) {
@@ -447,10 +448,21 @@ fn toggle_launcher(app: &Rc<App>) {
 }
 
 fn show_launcher(app: &Rc<App>) {
+    if app.state.borrow().launcher_visible {
+        defer(focus_launcher);
+        return;
+    }
+    app.state.borrow_mut().launcher_visible = true;
+    app.state.borrow_mut().shown_at = Some(Instant::now());
+    defer(show_launcher_now);
+}
+
+fn show_launcher_now(app: &Rc<App>) {
     reset_launcher_view(app);
     monitor::center_launcher(app.ui.launcher.window(), LAUNCHER_WIDTH, LAUNCHER_HEIGHT);
     if let Err(error) = app.ui.launcher.show() {
         error!(%error, "failed to show launcher");
+        app.state.borrow_mut().launcher_visible = false;
         return;
     }
     ensure_launcher_style(app);
@@ -458,19 +470,33 @@ fn show_launcher(app: &Rc<App>) {
         app.state.borrow_mut().launcher_hwnd = hwnd;
         window::force_foreground(hwnd);
     }
-    app.state.borrow_mut().launcher_visible = true;
+    defer(focus_launcher);
+}
+
+fn focus_launcher(app: &Rc<App>) {
+    if let Some(hwnd) = hwnd_from_slint(app.ui.launcher.window()) {
+        window::force_foreground(hwnd);
+    }
     app.ui.launcher.set_request_focus(true);
 }
 
 fn hide_launcher(app: &Rc<App>) {
-    let _ = app.ui.launcher.hide();
+    if !app.state.borrow().launcher_visible {
+        return;
+    }
     app.state.borrow_mut().launcher_visible = false;
+    defer(hide_launcher_now);
+}
+
+fn hide_launcher_now(app: &Rc<App>) {
+    let _ = app.ui.launcher.hide();
     reset_launcher_view(app);
 }
 
 fn reset_launcher_view(app: &Rc<App>) {
     app.state.borrow_mut().query.clear();
     app.state.borrow_mut().selected = 0;
+    app.ui.launcher.set_query(SharedString::default());
     refresh_launcher(app);
 }
 
@@ -499,6 +525,12 @@ fn maybe_hide_on_focus_lost(app: &Rc<App>) {
     if !inner.config.launcher.hide_on_focus_lost || !inner.launcher_visible {
         return;
     }
+    if inner
+        .shown_at
+        .is_some_and(|shown_at| shown_at.elapsed() < Duration::from_millis(350))
+    {
+        return;
+    }
     let foreground = window::current_foreground();
     let ours = [inner.launcher_hwnd, inner.settings_hwnd];
     if window::is_our_hwnd(foreground, &ours) {
@@ -510,6 +542,10 @@ fn maybe_hide_on_focus_lost(app: &Rc<App>) {
 
 fn show_settings(app: &Rc<App>) {
     hide_launcher(app);
+    defer(show_settings_now);
+}
+
+fn show_settings_now(app: &Rc<App>) {
     sync_general_controls(app);
     refresh_settings_list(app);
     if let Err(error) = app.ui.settings.show() {
@@ -525,8 +561,10 @@ fn show_settings(app: &Rc<App>) {
 
 fn hide_settings(app: &Rc<App>) {
     cancel_record(app);
-    let _ = app.ui.settings.hide();
     app.state.borrow_mut().settings_visible = false;
+    defer(|app| {
+        let _ = app.ui.settings.hide();
+    });
 }
 
 fn move_sel(app: &Rc<App>, direction: Direction) {

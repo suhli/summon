@@ -48,8 +48,18 @@ export component LauncherWindow inherits Window {
 
     changed request-focus => {
         if request-focus {
-            search-input.focus();
+            focus-timer.running = false;
+            focus-timer.running = true;
             request-focus = false;
+        }
+    }
+
+    focus-timer := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => {
+            search-input.focus();
+            self.running = false;
         }
     }
 

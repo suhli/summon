@@ -59,7 +59,10 @@ impl IconCache {
             return image;
         }
 
-        image_from_pixels(self.default_for(&entry.action))
+        let fallback = self.default_for(&entry.action).clone();
+        let image = image_from_pixels(&fallback);
+        self.pixels.insert(key, fallback);
+        image
     }
 
     pub fn refresh_changed(&mut self, entries: &[Entry]) {
@@ -70,6 +73,9 @@ impl IconCache {
             if !self.pixels.contains_key(&key) {
                 if let Some(pixels) = resolve_pixels(entry) {
                     self.pixels.insert(key, pixels);
+                } else {
+                    let fallback = self.default_for(&entry.action).clone();
+                    self.pixels.insert(key, fallback);
                 }
             }
         }
