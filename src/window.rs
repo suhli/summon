@@ -1,8 +1,9 @@
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::OnceLock;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tracing::{debug, warn};
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM, WIN32_ERROR, ERROR_SUCCESS};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM, WIN32_ERROR, ERROR_SUCCESS};
 use windows::Win32::Graphics::Dwm::{
     DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE,
     DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWM_SYSTEMBACKDROP_TYPE,
@@ -10,11 +11,14 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Accessibility::SetWinEventHook;
-use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_MENU,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, GetForegroundWindow, GetWindowLongPtrW, GetWindowThreadProcessId,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, EVENT_SYSTEM_FOREGROUND, GWL_EXSTYLE,
-    HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WINEVENT_OUTOFCONTEXT,
+    BringWindowToTop, CallWindowProcW, GetAncestor, GetForegroundWindow, GetWindowLongPtrW,
+    GetWindowThreadProcessId, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    EVENT_SYSTEM_FOREGROUND, GA_ROOT, GWLP_WNDPROC, GWL_EXSTYLE, HWND_TOPMOST, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_SHOW, WA_INACTIVE, WINEVENT_OUTOFCONTEXT, WM_ACTIVATE,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
 };
 
@@ -101,11 +105,22 @@ pub fn apply_launcher_style(hwnd: HWND, dark_mode: bool) {
 }
 
 static FOCUS_LOST: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+static WINEVENT_HOOKED: AtomicBool = AtomicBool::new(false);
+static SUBCLASSED_HWND: AtomicIsize = AtomicIsize::new(0);
+static OLD_WNDPROC: AtomicIsize = AtomicIsize::new(0);
 
-pub fn attach_focus_lost_handler(_hwnd: HWND, callback: impl Fn() + Send + Sync + 'static) {
+pub fn attach_focus_lost_handler(hwnd: HWND, callback: impl Fn() + Send + Sync + 'static) {
     let _ = FOCUS_LOST.set(Box::new(callback));
+    subclass_launcher(hwnd);
+    install_foreground_hook();
+}
+
+fn install_foreground_hook() {
+    if WINEVENT_HOOKED.swap(true, Ordering::SeqCst) {
+        return;
+    }
     unsafe {
-        let _ = SetWinEventHook(
+        let hook = SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND,
             EVENT_SYSTEM_FOREGROUND,
             None,
@@ -114,6 +129,54 @@ pub fn attach_focus_lost_handler(_hwnd: HWND, callback: impl Fn() + Send + Sync 
             0,
             WINEVENT_OUTOFCONTEXT,
         );
+        if hook.is_invalid() {
+            warn!("SetWinEventHook failed; falling back to window subclass and polling");
+            WINEVENT_HOOKED.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
+fn subclass_launcher(hwnd: HWND) {
+    if hwnd.0.is_null() {
+        return;
+    }
+    let ptr = hwnd.0 as isize;
+    if SUBCLASSED_HWND.load(Ordering::SeqCst) == ptr {
+        return;
+    }
+    unsafe {
+        let old = SetWindowLongPtrW(
+            hwnd,
+            GWLP_WNDPROC,
+            launcher_wndproc as *const () as usize as isize,
+        );
+        if old == 0 {
+            debug!("window subclass skipped");
+            return;
+        }
+        OLD_WNDPROC.store(old, Ordering::SeqCst);
+        SUBCLASSED_HWND.store(ptr, Ordering::SeqCst);
+    }
+}
+
+unsafe extern "system" fn launcher_wndproc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if msg == WM_ACTIVATE {
+        let state = (wparam.0 as u32) & 0xffff;
+        if state == WA_INACTIVE {
+            notify_focus_lost();
+        }
+    }
+    let old = OLD_WNDPROC.load(Ordering::SeqCst);
+    if old != 0 {
+        let proc = std::mem::transmute::<isize, windows::Win32::UI::WindowsAndMessaging::WNDPROC>(old);
+        CallWindowProcW(proc, hwnd, msg, wparam, lparam)
+    } else {
+        windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam)
     }
 }
 
@@ -126,6 +189,10 @@ unsafe extern "system" fn foreground_hook(
     _thread: u32,
     _time: u32,
 ) {
+    notify_focus_lost();
+}
+
+fn notify_focus_lost() {
     if let Some(callback) = FOCUS_LOST.get() {
         callback();
     }
@@ -133,6 +200,7 @@ unsafe extern "system" fn foreground_hook(
 
 pub fn force_foreground(hwnd: HWND) {
     unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOW);
         let foreground = GetForegroundWindow();
         let mut foreground_pid = 0;
         let foreground_tid = GetWindowThreadProcessId(foreground, Some(&mut foreground_pid));
@@ -140,16 +208,50 @@ pub fn force_foreground(hwnd: HWND) {
 
         if foreground_tid != 0 && foreground_tid != current_tid {
             let _ = AttachThreadInput(foreground_tid, current_tid, true);
-            if !SetForegroundWindow(hwnd).as_bool() {
-                warn!("SetForegroundWindow failed");
-            }
-            let _ = BringWindowToTop(hwnd);
-            let _ = AttachThreadInput(foreground_tid, current_tid, false);
-        } else if !SetForegroundWindow(hwnd).as_bool() {
-            let _ = BringWindowToTop(hwnd);
         }
 
+        pulse_alt_key();
+        if !SetForegroundWindow(hwnd).as_bool() {
+            warn!("SetForegroundWindow failed");
+        }
+        let _ = BringWindowToTop(hwnd);
         let _ = SetFocus(Some(hwnd));
+
+        if foreground_tid != 0 && foreground_tid != current_tid {
+            let _ = AttachThreadInput(foreground_tid, current_tid, false);
+        }
+    }
+}
+
+fn pulse_alt_key() {
+    let mut inputs = [
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_MENU,
+                    wScan: 0,
+                    dwFlags: Default::default(),
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VK_MENU,
+                    wScan: 0,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        },
+    ];
+    unsafe {
+        SendInput(&mut inputs, std::mem::size_of::<INPUT>() as i32);
     }
 }
 
@@ -157,7 +259,19 @@ pub fn is_our_hwnd(hwnd: HWND, ours: &[HWND]) -> bool {
     if hwnd.0.is_null() {
         return false;
     }
-    ours.iter().any(|candidate| candidate.0 == hwnd.0)
+    unsafe {
+        let fg_root = GetAncestor(hwnd, GA_ROOT);
+        ours.iter().any(|candidate| {
+            if candidate.0.is_null() {
+                return false;
+            }
+            let our_root = GetAncestor(*candidate, GA_ROOT);
+            candidate.0 == hwnd.0
+                || candidate.0 == fg_root.0
+                || our_root.0 == hwnd.0
+                || (!our_root.0.is_null() && our_root.0 == fg_root.0)
+        })
+    }
 }
 
 pub fn current_foreground() -> HWND {

@@ -1,4 +1,3 @@
-import { Palette } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { EntryTile } from "entry-tile.slint";
 
@@ -31,13 +30,28 @@ export component LauncherWindow inherits Window {
     in-out property <string> toast-text: "";
     in-out property <bool> toast-visible: false;
     in-out property <bool> empty: false;
-    out property <length> cell-w: columns > 0 ? (root.width - 40px) / columns : 120px;
-    out property <length> cell-h: 110px;
+
+    private property <length> content-pad: 20px;
+    private property <length> inner-w: scroller.width > 1px ? scroller.width : max(1px, root.width - content-pad * 2);
+    private property <length> cell-w: columns > 0 ? inner-w / columns : 120px;
+    private property <length> cell-h: 104px;
+    private property <int> row-count: columns <= 0 || tiles.length == 0 ? 0 : floor((tiles.length + columns - 1) / columns);
+
+    function tile-col(index: int) -> int {
+        if root.columns <= 0 { return 0; }
+        return mod(index, root.columns);
+    }
+
+    function tile-row(index: int) -> int {
+        if root.columns <= 0 { return 0; }
+        return floor(index / root.columns);
+    }
 
     callback query-changed(string);
     callback execute-selected();
     callback execute-id(string);
     callback hide-requested();
+    callback focus-lost();
     callback move-left();
     callback move-right();
     callback move-up();
@@ -65,13 +79,24 @@ export component LauncherWindow inherits Window {
         }
     }
 
+    blur-timer := Timer {
+        interval: 80ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if !keys.has-focus {
+                root.focus-lost();
+            }
+        }
+    }
+
     changed selected-index => {
         ensure-visible(selected-index);
     }
 
     function ensure-visible(index: int) {
         if columns <= 0 || index < 0 { return; }
-        let row = columns <= 0 ? 0 : index / columns;
+        let row = tile-row(index);
         let y = row * root.cell-h;
         if y < scroller.viewport-y {
             scroller.viewport-y = y;
@@ -82,6 +107,8 @@ export component LauncherWindow inherits Window {
     }
 
     Rectangle {
+        width: 100%;
+        height: 100%;
         border-radius: Theme.radius;
         background: Theme.panel;
         border-width: 1px;
@@ -92,9 +119,16 @@ export component LauncherWindow inherits Window {
         clip: true;
 
         keys := FocusScope {
-            x: 0; y: 0;
-            width: parent.width;
-            height: parent.height;
+            width: 100%;
+            height: 100%;
+
+            changed has-focus => {
+                if self.has-focus {
+                    blur-timer.running = false;
+                } else {
+                    blur-timer.running = true;
+                }
+            }
 
             capture-key-pressed(event) => {
                 if event.text == Key.Escape {
@@ -125,8 +159,10 @@ export component LauncherWindow inherits Window {
             }
 
             VerticalLayout {
-                padding: 20px;
+                padding: root.content-pad;
                 spacing: 16px;
+                width: parent.width;
+                height: parent.height;
 
                 search-box := Rectangle {
                     height: 44px;
@@ -134,41 +170,58 @@ export component LauncherWindow inherits Window {
                     background: Theme.search-bg;
                     border-width: 1px;
                     border-color: search-input.has-focus ? Theme.accent : Theme.search-border;
+                    clip: true;
 
                     HorizontalLayout {
-                        height: 100%;
-                        padding-left: 14px;
-                        padding-right: 14px;
+                        width: parent.width;
+                        height: parent.height;
+                        padding-left: 16px;
+                        padding-right: 16px;
                         spacing: 10px;
 
-                        Image {
-                            source: @image-url("assets/search.svg");
+                        VerticalLayout {
                             width: 16px;
-                            height: 16px;
-                            vertical-alignment: center;
-                        }
-
-                        search-input := TextInput {
-                            text <=> root.query;
-                            font-size: 16px;
-                            color: Theme.text;
-                            vertical-alignment: center;
-                            single-line: true;
-                            edited => {
-                                root.query-changed(self.text);
+                            alignment: center;
+                            Image {
+                                source: @image-url("assets/search.svg");
+                                width: 16px;
+                                height: 16px;
                             }
                         }
-                    }
 
-                    if search-input.text == "" : Text {
-                        x: 40px;
-                        y: 0;
-                        width: parent.width - 50px;
-                        height: parent.height;
-                        text: "Search";
-                        color: Theme.muted;
-                        font-size: 16px;
-                        vertical-alignment: center;
+                        input-area := Rectangle {
+                            horizontal-stretch: 1;
+                            vertical-stretch: 1;
+
+                            Text {
+                                x: 0;
+                                y: 0;
+                                width: 100%;
+                                height: 100%;
+                                text: "Search";
+                                color: Theme.muted;
+                                font-size: 16px;
+                                horizontal-alignment: left;
+                                vertical-alignment: center;
+                                visible: search-input.text == "";
+                            }
+
+                            search-input := TextInput {
+                                x: 0;
+                                y: 0;
+                                width: 100%;
+                                height: 100%;
+                                text <=> root.query;
+                                font-size: 16px;
+                                color: Theme.text;
+                                horizontal-alignment: left;
+                                vertical-alignment: center;
+                                single-line: true;
+                                edited => {
+                                    root.query-changed(self.text);
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -176,22 +229,30 @@ export component LauncherWindow inherits Window {
                     vertical-stretch: 1;
 
                     scroller := Flickable {
-                        width: 100%;
-                        height: 100%;
+                        width: parent.width;
+                        height: parent.height;
                         viewport-width: self.width;
-                        viewport-height: root.columns <= 0 || root.tiles.length == 0 ? self.height
-                            : max(self.height, ((root.tiles.length + root.columns - 1) / root.columns) * root.cell-h);
+                        viewport-height: max(self.height, root.row-count * root.cell-h);
 
-                        for tile[i] in root.tiles : EntryTile {
-                            x: root.columns <= 0 ? 0 : mod(i, root.columns) * root.cell-w;
-                            y: root.columns <= 0 ? 0 : (i / root.columns) * root.cell-h;
-                            width: root.cell-w;
-                            height: root.cell-h;
-                            name: tile.name;
-                            icon: tile.icon;
-                            selected: i == root.selected-index;
-                            clicked => {
-                                root.execute-id(tile.id);
+                        GridLayout {
+                            x: 0;
+                            y: 0;
+                            width: scroller.viewport-width;
+                            height: max(scroller.viewport-height, root.row-count * root.cell-h);
+                            spacing: 0px;
+                            padding: 0px;
+
+                            for tile[i] in root.tiles : EntryTile {
+                                row: tile-row(i);
+                                col: tile-col(i);
+                                horizontal-stretch: 1;
+                                height: root.cell-h;
+                                name: tile.name;
+                                icon: tile.icon;
+                                selected: i == root.selected-index;
+                                clicked => {
+                                    root.execute-id(tile.id);
+                                }
                             }
                         }
                     }

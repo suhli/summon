@@ -43,6 +43,7 @@ struct State {
     style_applied: bool,
     focus_hooked: bool,
     shown_at: Option<Instant>,
+    focus_watch: Timer,
     recording_target: Option<String>,
     toast_timer: Timer,
     settings_toast_timer: Timer,
@@ -108,6 +109,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         style_applied: false,
         focus_hooked: false,
         shown_at: None,
+        focus_watch: Timer::default(),
         recording_target: None,
         toast_timer: Timer::default(),
         settings_toast_timer: Timer::default(),
@@ -131,7 +133,10 @@ pub fn run() -> Result<(), slint::PlatformError> {
     if let Err(error) = app.ui.tray.show() {
         error!(%error, "tray show failed");
     }
-    show_launcher(&app);
+
+    slint::Timer::single_shot(Duration::from_millis(1), || {
+        with_app(show_launcher);
+    });
 
     info!("Summon ready");
     slint::run_event_loop_until_quit()?;
@@ -176,6 +181,9 @@ fn wire(app: &Rc<App>) {
     }
     {
         app.ui.launcher.on_hide_requested(|| defer(hide_launcher));
+    }
+    {
+        app.ui.launcher.on_focus_lost(|| defer(maybe_hide_on_focus_lost));
     }
     {
         let app_cb = app.clone();
@@ -470,14 +478,35 @@ fn show_launcher_now(app: &Rc<App>) {
         app.state.borrow_mut().launcher_hwnd = hwnd;
         window::force_foreground(hwnd);
     }
+    start_focus_watch(app);
     defer(focus_launcher);
 }
 
 fn focus_launcher(app: &Rc<App>) {
+    ensure_launcher_style(app);
     if let Some(hwnd) = hwnd_from_slint(app.ui.launcher.window()) {
+        app.state.borrow_mut().launcher_hwnd = hwnd;
         window::force_foreground(hwnd);
     }
     app.ui.launcher.set_request_focus(true);
+    slint::Timer::single_shot(Duration::from_millis(40), || {
+        with_app(|app| {
+            if app.state.borrow().launcher_visible {
+                app.ui.launcher.set_request_focus(true);
+            }
+        });
+    });
+    slint::Timer::single_shot(Duration::from_millis(120), || {
+        with_app(|app| {
+            if !app.state.borrow().launcher_visible {
+                return;
+            }
+            if let Some(hwnd) = hwnd_from_slint(app.ui.launcher.window()) {
+                window::force_foreground(hwnd);
+            }
+            app.ui.launcher.set_request_focus(true);
+        });
+    });
 }
 
 fn hide_launcher(app: &Rc<App>) {
@@ -489,8 +518,21 @@ fn hide_launcher(app: &Rc<App>) {
 }
 
 fn hide_launcher_now(app: &Rc<App>) {
+    stop_focus_watch(app);
     let _ = app.ui.launcher.hide();
     reset_launcher_view(app);
+}
+
+fn start_focus_watch(app: &Rc<App>) {
+    app.state.borrow().focus_watch.start(
+        TimerMode::Repeated,
+        Duration::from_millis(100),
+        || with_app(maybe_hide_on_focus_lost),
+    );
+}
+
+fn stop_focus_watch(app: &Rc<App>) {
+    app.state.borrow().focus_watch.stop();
 }
 
 fn reset_launcher_view(app: &Rc<App>) {
@@ -512,9 +554,12 @@ fn ensure_launcher_style(app: &Rc<App>) {
     }
     if !inner.focus_hooked {
         window::attach_focus_lost_handler(hwnd, || {
-            let _ = slint::invoke_from_event_loop(|| {
-                with_app(maybe_hide_on_focus_lost);
+            let queued = slint::invoke_from_event_loop(|| {
+                slint::Timer::single_shot(Duration::ZERO, || with_app(maybe_hide_on_focus_lost));
             });
+            if queued.is_err() {
+                slint::Timer::single_shot(Duration::ZERO, || with_app(maybe_hide_on_focus_lost));
+            }
         });
         inner.focus_hooked = true;
     }
@@ -527,7 +572,7 @@ fn maybe_hide_on_focus_lost(app: &Rc<App>) {
     }
     if inner
         .shown_at
-        .is_some_and(|shown_at| shown_at.elapsed() < Duration::from_millis(350))
+        .is_some_and(|shown_at| shown_at.elapsed() < Duration::from_millis(400))
     {
         return;
     }

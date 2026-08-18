@@ -7,11 +7,12 @@ export component EntryTile inherits Rectangle {
     callback clicked();
 
     background: transparent;
+    clip: true;
 
     highlight := Rectangle {
-        x: 6px;
+        x: 4px;
         y: 4px;
-        width: parent.width - 12px;
+        width: parent.width - 8px;
         height: parent.height - 8px;
         border-radius: Theme.tile-radius;
         background: touch.pressed ? Theme.tile-pressed
@@ -25,11 +26,11 @@ export component EntryTile inherits Rectangle {
     }
 
     VerticalLayout {
-        padding-top: 14px;
-        padding-bottom: 8px;
-        padding-left: 8px;
-        padding-right: 8px;
-        spacing: 8px;
+        width: 100%;
+        height: 100%;
+        padding: 8px;
+        spacing: 6px;
+        alignment: center;
 
         HorizontalLayout {
             alignment: center;
