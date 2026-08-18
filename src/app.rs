@@ -43,6 +43,7 @@ struct State {
     settings_hwnd: HWND,
     style_applied: bool,
     focus_hooked: bool,
+    winit_drop_hooked: bool,
     shown_at: Option<Instant>,
     held_focus: bool,
     focus_watch: Timer,
@@ -110,6 +111,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         settings_hwnd: HWND::default(),
         style_applied: false,
         focus_hooked: false,
+        winit_drop_hooked: false,
         shown_at: None,
         held_focus: false,
         focus_watch: Timer::default(),
@@ -152,6 +154,19 @@ pub fn run() -> Result<(), slint::PlatformError> {
 }
 
 fn wire(app: &Rc<App>) {
+    window::set_drop_callback(|paths| {
+        let fallback = paths.clone();
+        let queued = slint::invoke_from_event_loop(move || {
+            slint::Timer::single_shot(Duration::ZERO, move || {
+                with_app(move |app| handle_dropped_paths(app, paths));
+            });
+        });
+        if queued.is_err() {
+            slint::Timer::single_shot(Duration::ZERO, move || {
+                with_app(move |app| handle_dropped_paths(app, fallback));
+            });
+        }
+    });
     app.hotkeys.set_handler(move |target| {
         let _ = slint::invoke_from_event_loop(move || {
             with_app(|app| match target {
@@ -560,23 +575,48 @@ fn ensure_launcher_style(app: &Rc<App>) {
                 slint::Timer::single_shot(Duration::ZERO, || with_app(maybe_hide_on_focus_lost));
             }
         });
-        window::attach_drop_handler(hwnd, |paths| {
-            let fallback = paths.clone();
-            let queued = slint::invoke_from_event_loop(move || {
-                slint::Timer::single_shot(Duration::ZERO, move || {
-                    with_app(move |app| handle_dropped_paths(app, paths));
-                });
-            });
-            if queued.is_err() {
-                slint::Timer::single_shot(Duration::ZERO, move || {
-                    with_app(move |app| handle_dropped_paths(app, fallback));
-                });
-            }
-        });
+        window::attach_drop_handler(hwnd);
         inner.focus_hooked = true;
     }
+    drop(inner);
+    attach_winit_file_drop(app);
     window::enable_file_drop(hwnd);
     tray_drop::set_launcher_hwnd(hwnd);
+}
+
+fn attach_winit_file_drop(app: &Rc<App>) {
+    use slint::winit_030::{winit::event::WindowEvent, EventResult, WinitWindowAccessor};
+
+    if app.state.borrow().winit_drop_hooked {
+        return;
+    }
+    if !app.ui.launcher.window().has_winit_window() {
+        return;
+    }
+
+    let pending = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
+    app.ui.launcher.window().on_winit_window_event(move |_window, event| {
+        let WindowEvent::DroppedFile(path) = event else {
+            return EventResult::Propagate;
+        };
+        info!(path = %path.display(), "winit dropped file");
+        let mut queue = pending.borrow_mut();
+        let first = queue.is_empty();
+        queue.push(path.clone());
+        drop(queue);
+        if first {
+            let pending = pending.clone();
+            slint::Timer::single_shot(Duration::ZERO, move || {
+                let paths: Vec<_> = pending.borrow_mut().drain(..).collect();
+                if !paths.is_empty() {
+                    with_app(move |app| handle_dropped_paths(app, paths));
+                }
+            });
+        }
+        EventResult::PreventDefault
+    });
+    app.state.borrow_mut().winit_drop_hooked = true;
+    info!("winit file drop hooked");
 }
 
 fn maybe_hide_on_focus_lost(app: &Rc<App>) {
@@ -610,14 +650,19 @@ fn maybe_hide_on_focus_lost(app: &Rc<App>) {
 
 fn handle_dropped_paths(app: &Rc<App>, paths: Vec<PathBuf>) {
     if paths.is_empty() {
+        warn!("drop contained no paths");
         return;
     }
+    info!(count = paths.len(), "files dropped");
+    crate::tray_drop::hide();
 
     let mut added = 0usize;
     let mut skipped = 0usize;
     {
         let mut inner = app.state.borrow_mut();
+        inner.query.clear();
         for path in paths {
+            info!(path = %path.display(), "importing dropped path");
             let entry = dropped::entry_from_path(path);
             if inner
                 .config
@@ -633,13 +678,13 @@ fn handle_dropped_paths(app: &Rc<App>, paths: Vec<PathBuf>) {
             added += 1;
         }
         inner.shown_at = Some(Instant::now());
-        inner.held_focus = false;
+        inner.held_focus = true;
     }
 
-    if added > 0 {
-        persist(app);
-        apply_all(app, false);
-    }
+    app.ui.launcher.set_query(SharedString::default());
+    persist(app);
+    apply_all(app, true);
+    refresh_launcher(app);
 
     let message = match (added, skipped) {
         (0, 0) => return,
@@ -647,13 +692,8 @@ fn handle_dropped_paths(app: &Rc<App>, paths: Vec<PathBuf>) {
         (1, _) => "Added 1 shortcut".to_string(),
         (count, _) => format!("Added {count} shortcuts"),
     };
-    let visible = app.state.borrow().launcher_visible;
-    if added > 0 && !visible {
-        show_launcher(app);
-    } else {
-        steal_focus(app, true);
-    }
     toast(app, &message);
+    steal_focus(app, true);
 }
 
 fn show_settings(app: &Rc<App>) {

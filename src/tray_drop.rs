@@ -134,6 +134,10 @@ unsafe extern "system" fn drag_hook(
 }
 
 fn show_drop_target() {
+    if launcher_rect().is_some() {
+        hide_overlay();
+        return;
+    }
     let hwnd = overlay_hwnd();
     if hwnd.0.is_null() {
         return;
@@ -162,6 +166,10 @@ fn show_drop_target() {
     }
 }
 
+pub fn hide() {
+    hide_overlay();
+}
+
 fn hide_overlay() {
     let hwnd = overlay_hwnd();
     if hwnd.0.is_null() {
@@ -173,9 +181,6 @@ fn hide_overlay() {
 }
 
 fn target_rect() -> RECT {
-    if let Some(rect) = launcher_rect() {
-        return rect;
-    }
     chip_above_tray().unwrap_or(RECT {
         left: 40,
         top: 40,

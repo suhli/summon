@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -16,14 +16,16 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
     KEYEVENTF_KEYUP, VK_LBUTTON, VK_MENU,
 };
-use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
+use windows::Win32::UI::Shell::{
+    DefSubclassProc, DragAcceptFiles, DragFinish, DragQueryFileW, SetWindowSubclass, HDROP,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, BringWindowToTop, CallWindowProcW, GetAncestor, GetForegroundWindow,
-    GetWindowLongPtrW, GetWindowThreadProcessId, SetForegroundWindow, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, EVENT_SYSTEM_FOREGROUND, GA_ROOT, GWLP_WNDPROC, GWL_EXSTYLE,
-    HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-    SW_SHOW, WA_INACTIVE, WINEVENT_OUTOFCONTEXT, WM_ACTIVATE, WM_DROPFILES, WS_EX_ACCEPTFILES,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    AllowSetForegroundWindow, BringWindowToTop, ChangeWindowMessageFilterEx, GetAncestor,
+    GetForegroundWindow, GetWindowLongPtrW, GetWindowThreadProcessId, SetForegroundWindow,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, EVENT_SYSTEM_FOREGROUND, GA_ROOT, GWL_EXSTYLE,
+    HWND_TOPMOST, MSGFLT_ALLOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_SHOWWINDOW, SW_SHOW, WA_INACTIVE, WINEVENT_OUTOFCONTEXT, WM_ACTIVATE, WM_DROPFILES,
+    WS_EX_ACCEPTFILES, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
 };
 
 const DWMWCP_ROUND: DWM_WINDOW_CORNER_PREFERENCE = DWM_WINDOW_CORNER_PREFERENCE(2);
@@ -115,8 +117,11 @@ pub fn apply_launcher_style(hwnd: HWND, dark_mode: bool) {
 static FOCUS_LOST: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 static DROP_FILES: OnceLock<Box<dyn Fn(Vec<PathBuf>) + Send + Sync>> = OnceLock::new();
 static WINEVENT_HOOKED: AtomicBool = AtomicBool::new(false);
-static SUBCLASSED_HWND: AtomicIsize = AtomicIsize::new(0);
-static OLD_WNDPROC: AtomicIsize = AtomicIsize::new(0);
+const DROP_SUBCLASS_ID: usize = 0x534D4E31;
+
+pub fn set_drop_callback(callback: impl Fn(Vec<PathBuf>) + Send + Sync + 'static) {
+    let _ = DROP_FILES.set(Box::new(callback));
+}
 
 pub fn attach_focus_lost_handler(hwnd: HWND, callback: impl Fn() + Send + Sync + 'static) {
     let _ = FOCUS_LOST.set(Box::new(callback));
@@ -124,8 +129,7 @@ pub fn attach_focus_lost_handler(hwnd: HWND, callback: impl Fn() + Send + Sync +
     install_foreground_hook();
 }
 
-pub fn attach_drop_handler(hwnd: HWND, callback: impl Fn(Vec<PathBuf>) + Send + Sync + 'static) {
-    let _ = DROP_FILES.set(Box::new(callback));
+pub fn attach_drop_handler(hwnd: HWND) {
     subclass_launcher(hwnd);
     enable_file_drop(hwnd);
 }
@@ -136,6 +140,14 @@ pub fn enable_file_drop(hwnd: HWND) {
     }
     unsafe {
         DragAcceptFiles(hwnd, true);
+        let _ = ChangeWindowMessageFilterEx(hwnd, WM_DROPFILES, MSGFLT_ALLOW, None);
+        let _ = ChangeWindowMessageFilterEx(hwnd, 0x0049, MSGFLT_ALLOW, None);
+        let root = GetAncestor(hwnd, GA_ROOT);
+        if !root.0.is_null() && root.0 != hwnd.0 {
+            DragAcceptFiles(root, true);
+            let _ = ChangeWindowMessageFilterEx(root, WM_DROPFILES, MSGFLT_ALLOW, None);
+            subclass_launcher(root);
+        }
     }
 }
 
@@ -164,30 +176,18 @@ fn subclass_launcher(hwnd: HWND) {
     if hwnd.0.is_null() {
         return;
     }
-    let ptr = hwnd.0 as isize;
-    if SUBCLASSED_HWND.load(Ordering::SeqCst) == ptr {
-        return;
-    }
     unsafe {
-        let old = SetWindowLongPtrW(
-            hwnd,
-            GWLP_WNDPROC,
-            launcher_wndproc as *const () as usize as isize,
-        );
-        if old == 0 {
-            debug!("window subclass skipped");
-            return;
-        }
-        OLD_WNDPROC.store(old, Ordering::SeqCst);
-        SUBCLASSED_HWND.store(ptr, Ordering::SeqCst);
+        let _ = SetWindowSubclass(hwnd, Some(launcher_subclass), DROP_SUBCLASS_ID, 0);
     }
 }
 
-unsafe extern "system" fn launcher_wndproc(
+unsafe extern "system" fn launcher_subclass(
     hwnd: HWND,
     msg: u32,
     wparam: WPARAM,
     lparam: LPARAM,
+    _id: usize,
+    _data: usize,
 ) -> LRESULT {
     if msg == WM_DROPFILES {
         notify_drop_files(HDROP(wparam.0 as *mut std::ffi::c_void));
@@ -199,13 +199,7 @@ unsafe extern "system" fn launcher_wndproc(
             notify_focus_lost();
         }
     }
-    let old = OLD_WNDPROC.load(Ordering::SeqCst);
-    if old != 0 {
-        let proc = std::mem::transmute::<isize, windows::Win32::UI::WindowsAndMessaging::WNDPROC>(old);
-        CallWindowProcW(proc, hwnd, msg, wparam, lparam)
-    } else {
-        windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam)
-    }
+    DefSubclassProc(hwnd, msg, wparam, lparam)
 }
 
 unsafe extern "system" fn foreground_hook(
@@ -233,10 +227,13 @@ fn notify_drop_files(hdrop: HDROP) {
 
 pub fn dispatch_dropped_paths(paths: Vec<PathBuf>) {
     if paths.is_empty() {
+        warn!("drop contained no paths");
         return;
     }
     if let Some(callback) = DROP_FILES.get() {
         callback(paths);
+    } else {
+        warn!("drop callback missing");
     }
 }
 
@@ -428,6 +425,3 @@ fn wide(text: &str) -> Vec<u16> {
 fn ok_status(status: WIN32_ERROR) -> bool {
     status == ERROR_SUCCESS
 }
-
-#[allow(dead_code)]
-fn _unused(_w: WPARAM, _l: LPARAM) {}
