@@ -3,17 +3,22 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use tracing::{debug, warn};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{CreateSolidBrush, HBRUSH};
+use windows::Win32::Graphics::Gdi::{
+    BeginPaint, CreateSolidBrush, DrawTextW, EndPaint, FillRect, GetStockObject, SelectObject,
+    SetBkMode, SetTextColor, DEFAULT_GUI_FONT, DT_CENTER, DT_SINGLELINE, DT_VCENTER, HBRUSH,
+    PAINTSTRUCT, TRANSPARENT,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Accessibility::SetWinEventHook;
 use windows::Win32::UI::Shell::{DragAcceptFiles, Shell_NotifyIconGetRect, NOTIFYICONIDENTIFIER};
 use windows::Win32::UI::WindowsAndMessaging::{
     ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, FindWindowExW, FindWindowW,
-    GetWindowRect, GetCursorPos, KillTimer, MoveWindow, RegisterClassW, SetLayeredWindowAttributes, SetTimer,
-    SetWindowPos, ShowWindow, EVENT_SYSTEM_DRAGDROPEND, EVENT_SYSTEM_DRAGDROPSTART, HWND_MESSAGE,
-    HWND_TOPMOST, LWA_ALPHA, MSGFLT_ALLOW, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE,
-    SW_SHOWNOACTIVATE, WINEVENT_OUTOFCONTEXT, WM_DESTROY, WM_DROPFILES, WM_TIMER, WNDCLASSW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    GetClientRect, GetCursorPos, GetWindowRect, IsWindowVisible, MoveWindow, RegisterClassW,
+    SetTimer, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, EVENT_SYSTEM_DRAGDROPEND,
+    EVENT_SYSTEM_DRAGDROPSTART, HWND_MESSAGE, HWND_TOPMOST, MSGFLT_ALLOW, SWP_NOACTIVATE,
+    SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, WINEVENT_OUTOFCONTEXT, WM_DESTROY, WM_DROPFILES,
+    WM_ERASEBKGND, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_ACCEPTFILES, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::window;
@@ -22,14 +27,16 @@ use crate::window;
 const SLINT_TRAY_UID: u32 = 1;
 const CLASS_NAME: PCWSTR = w!("SummonTrayDropTarget");
 const SLINT_TRAY_CLASS: PCWSTR = w!("SlintSystemTrayWindow");
-const TIMER_TRACK: usize = 1;
-const TIMER_HIDE: usize = 2;
-const TIMER_WATCH: usize = 3;
+const TIMER_WATCH: usize = 1;
+const CHIP_W: i32 = 280;
+const CHIP_H: i32 = 64;
 
 static OVERLAY: AtomicIsize = AtomicIsize::new(0);
+static LAUNCHER: AtomicIsize = AtomicIsize::new(0);
 static DRAGGING: AtomicBool = AtomicBool::new(false);
 static BUTTON_WAS_DOWN: AtomicBool = AtomicBool::new(false);
-static PRESS_STARTED_ON_TRAY: AtomicBool = AtomicBool::new(false);
+static PRESS_ORIGIN_X: AtomicIsize = AtomicIsize::new(0);
+static PRESS_ORIGIN_Y: AtomicIsize = AtomicIsize::new(0);
 
 pub fn install() {
     if OVERLAY.load(Ordering::SeqCst) != 0 {
@@ -39,17 +46,22 @@ pub fn install() {
         Ok(hwnd) => {
             OVERLAY.store(hwnd.0 as isize, Ordering::SeqCst);
             install_drag_hook();
-            debug!("tray drop target ready");
+            debug!("drop target ready");
         }
-        Err(error) => warn!(%error, "tray drop target unavailable"),
+        Err(error) => warn!(%error, "drop target unavailable"),
     }
+}
+
+pub fn set_launcher_hwnd(hwnd: HWND) {
+    LAUNCHER.store(hwnd.0 as isize, Ordering::SeqCst);
 }
 
 fn create_overlay() -> Result<HWND, String> {
     unsafe {
         let hinstance = GetModuleHandleW(None).map_err(|error| error.to_string())?;
-        let brush = CreateSolidBrush(COLORREF(0x00F0F0F0));
+        let brush = CreateSolidBrush(COLORREF(0x002C2C2C));
         let class = WNDCLASSW {
+            style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(overlay_wndproc),
             hInstance: hinstance.into(),
             lpszClassName: CLASS_NAME,
@@ -59,14 +71,14 @@ fn create_overlay() -> Result<HWND, String> {
         let _ = RegisterClassW(&class);
 
         let hwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_ACCEPTFILES,
             CLASS_NAME,
-            w!(""),
+            w!("Drop to add"),
             WS_POPUP,
             0,
             0,
-            0,
-            0,
+            CHIP_W,
+            CHIP_H,
             None,
             None,
             Some(hinstance.into()),
@@ -74,7 +86,6 @@ fn create_overlay() -> Result<HWND, String> {
         )
         .map_err(|error| error.to_string())?;
 
-        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 72, LWA_ALPHA);
         DragAcceptFiles(hwnd, true);
         let _ = ChangeWindowMessageFilterEx(hwnd, WM_DROPFILES, MSGFLT_ALLOW, None);
         let _ = ChangeWindowMessageFilterEx(hwnd, 0x0049, MSGFLT_ALLOW, None);
@@ -95,7 +106,7 @@ fn install_drag_hook() {
             WINEVENT_OUTOFCONTEXT,
         );
         if hook.is_invalid() {
-            warn!("tray drag hook failed");
+            warn!("drag hook failed");
         }
     }
 }
@@ -110,53 +121,31 @@ unsafe extern "system" fn drag_hook(
     _time: u32,
 ) {
     if event == EVENT_SYSTEM_DRAGDROPSTART {
-        let _ = slint::invoke_from_event_loop(on_drag_start);
+        let _ = slint::invoke_from_event_loop(|| {
+            DRAGGING.store(true, Ordering::SeqCst);
+            show_drop_target();
+        });
     } else if event == EVENT_SYSTEM_DRAGDROPEND {
-        let _ = slint::invoke_from_event_loop(on_drag_end);
+        let _ = slint::invoke_from_event_loop(|| {
+            DRAGGING.store(false, Ordering::SeqCst);
+            hide_overlay();
+        });
     }
 }
 
-fn on_drag_start() {
-    DRAGGING.store(true, Ordering::SeqCst);
+fn show_drop_target() {
     let hwnd = overlay_hwnd();
     if hwnd.0.is_null() {
         return;
     }
-    unsafe {
-        let _ = KillTimer(Some(hwnd), TIMER_HIDE);
-        let _ = SetTimer(Some(hwnd), TIMER_TRACK, 50, None);
-    }
-    show_over_tray();
-}
-
-fn on_drag_end() {
-    DRAGGING.store(false, Ordering::SeqCst);
-    let hwnd = overlay_hwnd();
-    if hwnd.0.is_null() {
-        return;
-    }
-    unsafe {
-        let _ = KillTimer(Some(hwnd), TIMER_TRACK);
-        let _ = SetTimer(Some(hwnd), TIMER_HIDE, 250, None);
-    }
-}
-
-fn show_over_tray() {
-    let hwnd = overlay_hwnd();
-    if hwnd.0.is_null() {
-        return;
-    }
-    let Some(rect) = drop_rect() else {
-        hide_overlay();
-        return;
-    };
+    let rect = target_rect();
     unsafe {
         let _ = MoveWindow(
             hwnd,
             rect.left,
             rect.top,
-            (rect.right - rect.left).max(24),
-            (rect.bottom - rect.top).max(24),
+            (rect.right - rect.left).max(CHIP_W),
+            (rect.bottom - rect.top).max(CHIP_H),
             true,
         );
         let _ = SetWindowPos(
@@ -179,14 +168,57 @@ fn hide_overlay() {
         return;
     }
     unsafe {
-        let _ = KillTimer(Some(hwnd), TIMER_TRACK);
-        let _ = KillTimer(Some(hwnd), TIMER_HIDE);
         let _ = ShowWindow(hwnd, SW_HIDE);
     }
 }
 
-fn drop_rect() -> Option<RECT> {
-    icon_rect().or_else(notification_area_rect).map(inflate)
+fn target_rect() -> RECT {
+    if let Some(rect) = launcher_rect() {
+        return rect;
+    }
+    chip_above_tray().unwrap_or(RECT {
+        left: 40,
+        top: 40,
+        right: 40 + CHIP_W,
+        bottom: 40 + CHIP_H,
+    })
+}
+
+fn launcher_rect() -> Option<RECT> {
+    let hwnd = HWND(LAUNCHER.load(Ordering::SeqCst) as *mut std::ffi::c_void);
+    if hwnd.0.is_null() {
+        return None;
+    }
+    unsafe {
+        if !IsWindowVisible(hwnd).as_bool() {
+            return None;
+        }
+        let mut rect = RECT::default();
+        GetWindowRect(hwnd, &mut rect).ok()?;
+        if rect.right - rect.left < 80 {
+            return None;
+        }
+        Some(rect)
+    }
+}
+
+fn chip_above_tray() -> Option<RECT> {
+    let icon = icon_rect().or_else(notification_area_rect)?;
+    let mid_x = icon.left + (icon.right - icon.left) / 2;
+    let mut left = mid_x - CHIP_W / 2;
+    let mut top = icon.top - CHIP_H - 16;
+    if top < 8 {
+        top = icon.bottom + 16;
+    }
+    if left < 8 {
+        left = 8;
+    }
+    Some(RECT {
+        left,
+        top,
+        right: left + CHIP_W,
+        bottom: top + CHIP_H,
+    })
 }
 
 fn icon_rect() -> Option<RECT> {
@@ -223,49 +255,70 @@ fn notification_area_rect() -> Option<RECT> {
     }
 }
 
-fn inflate(mut rect: RECT) -> RECT {
-    rect.left -= 8;
-    rect.top -= 8;
-    rect.right += 8;
-    rect.bottom += 8;
-    rect
-}
-
 fn overlay_hwnd() -> HWND {
     HWND(OVERLAY.load(Ordering::SeqCst) as *mut std::ffi::c_void)
 }
 
-fn poll_drag_onto_tray() {
+fn poll_drag() {
     let down = window::primary_button_down();
-    let over = cursor_over_drop_rect();
     let was_down = BUTTON_WAS_DOWN.swap(down, Ordering::SeqCst);
+    let mut point = POINT::default();
+    let _ = unsafe { GetCursorPos(&mut point) };
 
     if down && !was_down {
-        PRESS_STARTED_ON_TRAY.store(over, Ordering::SeqCst);
-    }
-    if !down {
-        PRESS_STARTED_ON_TRAY.store(false, Ordering::SeqCst);
+        PRESS_ORIGIN_X.store(point.x as isize, Ordering::SeqCst);
+        PRESS_ORIGIN_Y.store(point.y as isize, Ordering::SeqCst);
     }
 
-    let started_on_tray = PRESS_STARTED_ON_TRAY.load(Ordering::SeqCst);
-    let ole_dragging = DRAGGING.load(Ordering::SeqCst);
+    let dragged = down
+        && ((point.x as isize - PRESS_ORIGIN_X.load(Ordering::SeqCst)).abs() > 12
+            || (point.y as isize - PRESS_ORIGIN_Y.load(Ordering::SeqCst)).abs() > 12);
 
-    if down && over && !started_on_tray {
-        show_over_tray();
-    } else if !ole_dragging && (!down || !over) {
+    if DRAGGING.load(Ordering::SeqCst) || (dragged && near_tray(&point)) {
+        show_drop_target();
+    } else if !down {
         hide_overlay();
     }
 }
 
-fn cursor_over_drop_rect() -> bool {
-    let Some(rect) = drop_rect() else {
+fn near_tray(point: &POINT) -> bool {
+    let Some(rect) = icon_rect()
+        .or_else(notification_area_rect)
+        .or_else(chip_above_tray)
+    else {
         return false;
     };
-    let mut point = POINT::default();
-    if unsafe { GetCursorPos(&mut point) }.is_err() {
-        return false;
+    let pad = 96;
+    point.x >= rect.left - pad
+        && point.x <= rect.right + pad
+        && point.y >= rect.top - pad
+        && point.y <= rect.bottom + pad
+}
+
+fn paint_overlay(hwnd: HWND) {
+    unsafe {
+        let mut ps = PAINTSTRUCT::default();
+        let hdc = BeginPaint(hwnd, &mut ps);
+        let mut client = RECT::default();
+        let _ = GetClientRect(hwnd, &mut client);
+        let brush = CreateSolidBrush(COLORREF(0x002C2C2C));
+        FillRect(hdc, &client, brush);
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, COLORREF(0x00FFFFFF));
+        let font = GetStockObject(DEFAULT_GUI_FONT);
+        let _ = SelectObject(hdc, font);
+        let mut text: Vec<u16> = "Drop programs or shortcuts here"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        DrawTextW(
+            hdc,
+            &mut text,
+            &mut client,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
+        let _ = EndPaint(hwnd, &ps);
     }
-    point.x >= rect.left && point.x < rect.right && point.y >= rect.top && point.y < rect.bottom
 }
 
 unsafe extern "system" fn overlay_wndproc(
@@ -275,6 +328,11 @@ unsafe extern "system" fn overlay_wndproc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        WM_PAINT => {
+            paint_overlay(hwnd);
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => LRESULT(1),
         WM_DROPFILES => {
             let paths = window::paths_from_wparam(wparam);
             hide_overlay();
@@ -284,13 +342,7 @@ unsafe extern "system" fn overlay_wndproc(
         }
         WM_TIMER => {
             if wparam.0 == TIMER_WATCH {
-                poll_drag_onto_tray();
-            } else if wparam.0 == TIMER_TRACK {
-                if DRAGGING.load(Ordering::SeqCst) {
-                    show_over_tray();
-                }
-            } else if wparam.0 == TIMER_HIDE {
-                hide_overlay();
+                poll_drag();
             }
             LRESULT(0)
         }

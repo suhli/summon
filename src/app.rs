@@ -576,6 +576,7 @@ fn ensure_launcher_style(app: &Rc<App>) {
         inner.focus_hooked = true;
     }
     window::enable_file_drop(hwnd);
+    tray_drop::set_launcher_hwnd(hwnd);
 }
 
 fn maybe_hide_on_focus_lost(app: &Rc<App>) {
