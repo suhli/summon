@@ -238,7 +238,7 @@ export component LauncherWindow inherits Window {
                             x: 0;
                             y: 0;
                             width: scroller.viewport-width;
-                            height: max(scroller.viewport-height, root.row-count * root.cell-h);
+                            height: root.row-count * root.cell-h;
                             spacing: 0px;
                             padding: 0px;
 
@@ -246,6 +246,7 @@ export component LauncherWindow inherits Window {
                                 row: tile-row(i);
                                 col: tile-col(i);
                                 horizontal-stretch: 1;
+                                vertical-stretch: 0;
                                 height: root.cell-h;
                                 name: tile.name;
                                 icon: tile.icon;
